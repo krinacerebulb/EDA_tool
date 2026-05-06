@@ -1,110 +1,216 @@
-# Auto EDA — Server Deploy
+# Auto EDA Platform
 
-Self-contained folder for deploying the Auto EDA Streamlit app.
-Upload **this folder** as-is to your server / hosting provider.
-
-## What's inside
-
-```
-deploy/
-├── app.py                  # Streamlit entry point
-├── modules/                # business logic
-├── utils/                  # helpers
-├── requirements.txt        # Python deps
-├── .streamlit/config.toml  # server-safe Streamlit settings
-├── Procfile                # Render / Railway / Heroku start command
-├── Dockerfile              # for any container host
-├── .dockerignore
-└── .gitignore
-```
-
-Nothing else from the dev repo is required at runtime.
+A polished, no-code exploratory data analysis platform that transforms raw datasets into interactive insights and downloadable reports within seconds.
 
 ---
 
-## Option 1 — Streamlit Community Cloud (free, easiest)
+## Overview
 
-1. Push this folder to a GitHub repo.
-2. Go to <https://share.streamlit.io> → **New app**.
-3. Pick the repo, set **Main file path** to `app.py`.
-4. Deploy. Done.
+Auto EDA Platform is a self-service analytics application designed to simplify exploratory data analysis for both technical and non-technical users.
 
----
+Upload a dataset and the platform automatically:
 
-## Option 2 — Render / Railway / Fly.io / Heroku
+- Profiles the dataset
+- Detects missing values and duplicates
+- Identifies outliers
+- Generates interactive visualizations
+- Performs target-based analysis
+- Detects time-series trends
+- Generates plain-English insights
+- Creates downloadable HTML reports
 
-The included `Procfile` already has the right start command.
-
-**Render:**
-1. New → Web Service → connect repo.
-2. Environment: **Python 3**.
-3. Build command: `pip install -r requirements.txt`
-4. Start command: leave empty (uses Procfile).
-
-**Railway:** New project → Deploy from GitHub → it picks up the Procfile automatically.
+The platform eliminates repetitive manual EDA workflows and provides a fast, consistent, and user-friendly analytics experience.
 
 ---
 
-## Option 3 — Docker (any container host: AWS, GCP, Azure, your own)
+## Features
+
+- Upload CSV, Excel, JSON, and Parquet datasets
+- Automated exploratory data analysis
+- Smart data type detection
+- Missing-value analysis
+- Duplicate detection
+- Outlier detection using IQR
+- Interactive filtering system
+- Correlation analysis
+- Target-based analytics
+- Time-series trend analysis
+- Interactive Plotly visualizations
+- Auto-generated insights
+- Downloadable HTML reports
+- No-code interface for non-technical users
+
+---
+
+## Technology Stack
+
+| Layer           | Technology                  |
+| --------------- | --------------------------- |
+| Language        | Python 3.11+                |
+| UI Framework    | Streamlit                   |
+| Data Processing | Pandas, NumPy               |
+| Visualization   | Plotly, Matplotlib, Seaborn |
+| File Support    | openpyxl, xlrd, pyarrow     |
+| Statistics      | SciPy                       |
+| Templating      | Jinja2                      |
+
+---
+
+## Installation
+
+### 1. Clone Repository
 
 ```bash
-docker build -t auto-eda .
-docker run -p 8501:8501 auto-eda
-```
-
-Open <http://localhost:8501>. To deploy, push the image to your registry of choice.
-
----
-
-## Option 4 — Plain Linux VPS (Ubuntu / Debian)
-
-```bash
-# 1. Upload the folder, then on the server:
-cd /opt/auto-eda
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# 2. Run (foreground test)
-streamlit run app.py --server.port=8501 --server.address=0.0.0.0
-
-# 3. For production, run as a systemd service. Create
-#    /etc/systemd/system/auto-eda.service:
-```
-
-```ini
-[Unit]
-Description=Auto EDA Streamlit
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/auto-eda
-ExecStart=/opt/auto-eda/.venv/bin/streamlit run app.py --server.port=8501 --server.address=0.0.0.0
-Restart=always
-User=www-data
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable --now auto-eda
-sudo systemctl status auto-eda
-```
-
-Then put nginx (or Caddy) in front for HTTPS / domain.
-
----
-
-## Local sanity check before uploading
-
-```bash
+git clone <your-repository-url>
 cd deploy
+```
+
+### 2. Create Virtual Environment
+
+#### Windows
+
+```bash
 python -m venv .venv
-.venv\Scripts\activate           # Windows
-# source .venv/bin/activate      # Linux/macOS
+.venv\Scripts\activate
+```
+
+#### macOS / Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Install Dependencies
+
+```bash
 pip install -r requirements.txt
+```
+
+### 4. Run Application
+
+```bash
 streamlit run app.py
 ```
 
-If it opens at <http://localhost:8501> and works, the server deploy will work too.
+Application runs at:
+
+```text
+http://localhost:8501
+```
+
+---
+
+## Deployment
+
+### Streamlit Community Cloud
+
+1. Push the project to GitHub
+2. Open Streamlit Community Cloud
+3. Create a new app
+4. Select the repository
+5. Set the main file path to:
+
+```text
+app.py
+```
+
+6. Click Deploy
+
+---
+
+## Usage Guide
+
+### Upload Dataset
+
+Upload supported file formats:
+
+- CSV
+- Excel
+- JSON
+- Parquet
+
+using the sidebar uploader.
+
+---
+
+### Apply Filters
+
+Use interactive sidebar filters to dynamically refine the dataset.
+
+All analysis tabs update automatically based on filtered data.
+
+---
+
+### Explore Tabs
+
+The platform includes:
+
+- Overview
+- Cleaning
+- Statistics
+- Visualizations
+- Time Series
+- Target Analysis
+- Insights
+- Report Generation
+
+---
+
+### Generate Reports
+
+Generate downloadable HTML reports containing:
+
+- Summary statistics
+- Visualizations
+- Dataset insights
+- Data quality analysis
+
+---
+
+## Project Structure
+
+```text
+deploy/
+├── app.py
+├── modules/
+│   ├── data_loader.py
+│   ├── data_cleaning.py
+│   ├── eda_analysis.py
+│   ├── filters.py
+│   ├── insights.py
+│   ├── interactive_viz.py
+│   ├── visualization.py
+│   ├── target_analysis.py
+│   ├── time_series.py
+│   ├── type_detection.py
+│   └── report_generator.py
+├── utils/
+├── ui/
+├── assets/
+├── .streamlit/
+│   └── config.toml
+├── requirements.txt
+├── Dockerfile
+├── Procfile
+└── README.md
+```
+
+---
+
+## Future Improvements
+
+- AI-generated insights
+- AutoML integration
+- Advanced forecasting
+- Multi-user collaboration
+- Cloud database integrations
+- Authentication system
+- API support
+- Dashboard export options
+
+---
+
+## License
+
+This project is licensed under the MIT License.

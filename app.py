@@ -4,7 +4,12 @@ Run with:
     streamlit run app.py
 """
 
+from pathlib import Path
+
 import streamlit as st
+
+LOGO_PATH = Path(__file__).parent / "assets" / "cb-logo-tagline-main.png"
+LOGO = str(LOGO_PATH) if LOGO_PATH.exists() else None
 
 from modules import (
     data_cleaning,
@@ -21,11 +26,80 @@ from modules import (
 from utils.helpers import human_bytes, split_columns
 
 
-st.set_page_config(page_title="Auto EDA Tool", layout="wide", page_icon=":bar_chart:")
+st.set_page_config(
+    page_title="Auto EDA Platform",
+    page_icon=LOGO or ":bar_chart:",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+    <style>
+      /* --- Hide non-essential Streamlit chrome (without breaking the
+             collapsed-sidebar expand chevron) --- */
+      #MainMenu {visibility: hidden;}
+      footer {visibility: hidden;}
+      [data-testid="stDeployButton"] {display: none;}
+      [data-testid="stToolbarActions"] {visibility: hidden;}
+      [data-testid="stStatusWidget"] {visibility: hidden;}
+
+      /* Force the sidebar expand control to stay visible. */
+      [data-testid="stSidebarCollapsedControl"],
+      [data-testid="collapsedControl"] {
+        visibility: visible !important;
+        display: flex !important;
+      }
+
+      /* --- Spacing polish --- */
+      .block-container {padding-top: 2rem; padding-bottom: 3rem;}
+      [data-testid="stSidebar"] {padding-top: 0.5rem;}
+      [data-testid="stSidebar"] [data-testid="stImage"] {margin-bottom: 0.6rem;}
+
+      /* --- Section titles --- */
+      h1, h2, h3 {color: #1F2A37; letter-spacing: -0.01em;}
+      h1 {font-weight: 600;}
+
+      /* --- Metric cards --- */
+      [data-testid="stMetric"] {
+        background: #FAFBFC;
+        border: 1px solid #E5E7EB;
+        padding: 0.75rem 1rem;
+        border-radius: 8px;
+      }
+
+      /* --- Buttons --- */
+      .stButton > button, .stDownloadButton > button {
+        border-radius: 6px;
+        font-weight: 500;
+        padding: 0.45rem 1rem;
+      }
+
+      /* --- Plot container breathing room --- */
+      [data-testid="stPlotlyChart"] {margin-bottom: 0.75rem;}
+
+      /* --- Sidebar product strip --- */
+      .cerebulb-product {
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: #6B7280;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        margin: 0.25rem 0 1rem 0;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ---------- Sidebar ----------
-st.sidebar.title("Auto EDA")
+if LOGO:
+    st.sidebar.image(LOGO, width=180)
+st.sidebar.markdown(
+    "<div class='cerebulb-product'>Auto EDA Platform</div>",
+    unsafe_allow_html=True,
+)
 st.sidebar.markdown("Upload a dataset to get started.")
 
 uploaded_file = st.sidebar.file_uploader(
@@ -49,8 +123,8 @@ auto_convert = st.sidebar.checkbox(
 
 
 # ---------- Main ----------
-st.title(":bar_chart: Auto EDA Tool")
-st.caption("Automated exploratory data analysis, visualizations and insights.")
+st.title("Auto EDA Platform")
+st.caption("Automated exploratory data analysis, visualizations, and insights — a Cerebulb product.")
 
 if uploaded_file is None:
     st.info("Upload a dataset from the sidebar to begin.")
