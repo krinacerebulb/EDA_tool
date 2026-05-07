@@ -11,8 +11,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-
-_TEMPLATE = "plotly_white"
+from utils.helpers import plotly_template
 
 
 def histogram(df: pd.DataFrame, column: str, bins: int = 30) -> go.Figure:
@@ -24,7 +23,7 @@ def histogram(df: pd.DataFrame, column: str, bins: int = 30) -> go.Figure:
         title=f"Distribution of {column}",
         marginal="box",
         opacity=0.85,
-        template=_TEMPLATE,
+        template=plotly_template(),
     )
     fig.update_layout(bargap=0.05, yaxis_title="Frequency")
     return fig
@@ -37,7 +36,7 @@ def boxplot(df: pd.DataFrame, column: str) -> go.Figure:
         x=column,
         points="outliers",
         title=f"Boxplot of {column}",
-        template=_TEMPLATE,
+        template=plotly_template(),
     )
     return fig
 
@@ -51,7 +50,7 @@ def bar_chart(df: pd.DataFrame, column: str, top_n: int = 10) -> go.Figure:
         orientation="h",
         title=f"Top {len(counts)} values in {column}",
         labels={"x": "Count", "y": column},
-        template=_TEMPLATE,
+        template=plotly_template(),
     )
     fig.update_layout(yaxis={"categoryorder": "total ascending"})
     return fig
@@ -70,7 +69,7 @@ def scatter(
         x=x,
         y=y,
         title=f"{y} vs {x}",
-        template=_TEMPLATE,
+        template=plotly_template(),
         opacity=0.7,
     )
     if color and color in df.columns:
@@ -100,7 +99,7 @@ def correlation_heatmap(df: pd.DataFrame) -> go.Figure | None:
         zmax=1,
         aspect="auto",
         title="Correlation Heatmap",
-        template=_TEMPLATE,
+        template=plotly_template(),
     )
     fig.update_layout(coloraxis_colorbar=dict(title="corr"))
     return fig
@@ -114,7 +113,7 @@ def grouped_box(df: pd.DataFrame, category: str, numeric: str) -> go.Figure:
         y=numeric,
         points="outliers",
         title=f"{numeric} by {category}",
-        template=_TEMPLATE,
+        template=plotly_template(),
     )
     fig.update_layout(xaxis_tickangle=-30)
     return fig
@@ -265,7 +264,7 @@ def multi_line_time_series(
     layout: dict = dict(
         title=f"{title_cols} over {date_col}",
         xaxis_title=date_col,
-        template=_TEMPLATE,
+        template=plotly_template(),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )

@@ -15,17 +15,65 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from utils.helpers import plotly_template
 
-_DATETIME_PARSE_THRESHOLD = 0.8  # % of sampled values that must parse
+
+_DATETIME_PARSE_THRESHOLD = 0.7  # % of sampled values that must parse
+_SAMPLE_LIMIT = 500              # cap for detection to keep things responsive
+
+# Strategies tried in order; we keep the parse with the highest success rate.
+# Covers: ISO datetimes, datetimes with milliseconds, time-only strings,
+# day-first formats (e.g. "31-12-2024 12:45:30").
+_PARSE_STRATEGIES: list[dict] = [
+    {"format": "mixed"},
+    {},                           # pandas default (handles ISO and many ISO-like)
+    {"dayfirst": True},
+    {"format": "%H:%M:%S"},
+    {"format": "%H:%M:%S.%f"},
+    {"format": "%d-%m-%Y %H:%M:%S"},
+    {"format": "%d/%m/%Y %H:%M:%S"},
+]
+
+
+def _best_parse(series: pd.Series):
+    """Try multiple parsing strategies; return (parsed, success_rate).
+
+    ``parsed`` is None if every strategy raises before producing a result.
+    ``success_rate`` is the fraction of non-null inputs that parsed.
+    """
+    s = series.dropna()
+    if s.empty:
+        return None, 0.0
+
+    if len(s) > _SAMPLE_LIMIT:
+        s = s.sample(_SAMPLE_LIMIT, random_state=42)
+
+    best_parsed = None
+    best_rate = 0.0
+    for strat in _PARSE_STRATEGIES:
+        try:
+            parsed = pd.to_datetime(s, errors="coerce", **strat)
+        except (TypeError, ValueError):
+            continue
+        except Exception:
+            continue
+        rate = float(parsed.notna().mean()) if len(parsed) else 0.0
+        if rate > best_rate:
+            best_rate = rate
+            best_parsed = parsed
+    return best_parsed, best_rate
 
 
 def detect_datetime_columns(df: pd.DataFrame) -> list[str]:
-    """Return column names that are datetime or look parseable as datetime.
+    """Return column names that are datetime or parseable as datetime.
 
     A column qualifies if either:
     - pandas already considers its dtype datetime-like, or
-    - it is an object column whose first sampled non-null values parse
-      into datetime with a success rate >= ``_DATETIME_PARSE_THRESHOLD``.
+    - any parsing strategy in :data:`_PARSE_STRATEGIES` reaches a success rate
+      of at least :data:`_DATETIME_PARSE_THRESHOLD` on a sample of its values.
+
+    Handles date-only, time-only, datetime-with-milliseconds, and day-first
+    formats.
     """
     found: list[str] = []
     for col in df.columns:
@@ -33,18 +81,60 @@ def detect_datetime_columns(df: pd.DataFrame) -> list[str]:
         if pd.api.types.is_datetime64_any_dtype(s):
             found.append(col)
             continue
-        if s.dtype != "object":
+        # Numeric columns are skipped — they would otherwise be reinterpreted
+        # as Unix epochs and pollute the detection.
+        if pd.api.types.is_numeric_dtype(s):
             continue
-        sample = s.dropna().head(50)
-        if sample.empty:
+        if s.dtype not in ("object", "string"):
             continue
-        try:
-            parsed = pd.to_datetime(sample, errors="coerce")
-        except Exception:
-            continue
-        if parsed.notna().mean() >= _DATETIME_PARSE_THRESHOLD:
+        _, rate = _best_parse(s)
+        if rate >= _DATETIME_PARSE_THRESHOLD:
             found.append(col)
     return found
+
+
+def datetime_detection_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Tabular summary of datetime-like columns.
+
+    Columns: ``Column``, ``Detected Type``, ``Confidence``, ``Invalid``.
+    Includes any column that parses with at least 50% confidence so users
+    can spot near-misses worth a manual dtype conversion.
+    """
+    rows: list[dict] = []
+    for col in df.columns:
+        s = df[col]
+        if pd.api.types.is_datetime64_any_dtype(s):
+            rows.append({
+                "Column": col,
+                "Detected Type": "datetime (native dtype)",
+                "Confidence": "100.0%",
+                "Invalid": 0,
+            })
+            continue
+        if pd.api.types.is_numeric_dtype(s):
+            continue
+        if s.dtype not in ("object", "string"):
+            continue
+        non_null = s.dropna()
+        if non_null.empty:
+            continue
+        parsed, rate = _best_parse(s)
+        if parsed is None or rate < 0.5:
+            continue
+        # Approximate invalid count by extrapolating sample failure rate.
+        invalid_in_sample = int(parsed.isna().sum())
+        sample_size = len(parsed)
+        scale = len(non_null) / sample_size if sample_size else 1.0
+        invalid_estimate = int(round(invalid_in_sample * scale))
+        rows.append({
+            "Column": col,
+            "Detected Type": "datetime (parseable)",
+            "Confidence": f"{rate * 100:.1f}%",
+            "Invalid": invalid_estimate,
+        })
+    return pd.DataFrame(
+        rows, columns=["Column", "Detected Type", "Confidence", "Invalid"]
+    )
 
 
 def prepare_series(
@@ -103,7 +193,7 @@ def time_series_plot(
         title=f"{value_col} over {date_col}",
         xaxis_title=date_col,
         yaxis_title=value_col,
-        template="plotly_white",
+        template=plotly_template(),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )

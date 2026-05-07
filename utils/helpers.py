@@ -32,3 +32,19 @@ def human_bytes(num: int) -> str:
             return f"{num:.1f} {unit}"
         num /= 1024.0
     return f"{num:.1f} TB"
+
+
+def plotly_template() -> str:
+    """Return the active Plotly template based on the user's theme choice.
+
+    Reads ``st.session_state['theme']`` if Streamlit is available; defaults to
+    the light template otherwise. Safe to call from non-UI modules.
+    """
+    try:
+        import streamlit as st
+
+        if st.session_state.get("theme") == "Dark":
+            return "plotly_dark"
+    except Exception:
+        pass
+    return "plotly_white"
