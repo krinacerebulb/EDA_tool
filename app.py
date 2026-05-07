@@ -342,8 +342,26 @@ with tabs[0]:
     st.subheader("Column Types")
     st.dataframe(dtype_info, use_container_width=True)
 
-    st.subheader("Download filtered dataset")
-    filters.download_button(df)
+    st.subheader("Download dataset")
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        filters.download_button(df, label="Download filtered CSV (rows in range)")
+    with dl2:
+        if flt_summary["is_filtered"]:
+            excluded_df = preprocessed_df.loc[
+                preprocessed_df.index.difference(df.index)
+            ]
+            if not excluded_df.empty:
+                st.download_button(
+                    label="Download excluded CSV (rows outside range)",
+                    data=excluded_df.to_csv(index=False).encode("utf-8"),
+                    file_name="excluded_dataset.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.caption("No excluded rows for the current filters.")
+        else:
+            st.caption("No filters applied — nothing to export as excluded.")
 
 
 # ---------- Cleaning ----------

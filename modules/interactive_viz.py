@@ -15,7 +15,7 @@ from utils.helpers import plotly_template
 
 
 def histogram(df: pd.DataFrame, column: str, bins: int = 30) -> go.Figure:
-    """Interactive histogram for a numeric column."""
+    """Interactive histogram for a numeric column with mean and ±1σ overlays."""
     fig = px.histogram(
         df,
         x=column,
@@ -26,6 +26,49 @@ def histogram(df: pd.DataFrame, column: str, bins: int = 30) -> go.Figure:
         template=plotly_template(),
     )
     fig.update_layout(bargap=0.05, yaxis_title="Frequency")
+
+    series = pd.to_numeric(df[column], errors="coerce").dropna()
+    if not series.empty:
+        mean = float(series.mean())
+        std = float(series.std()) if len(series) > 1 else float("nan")
+
+        if pd.notna(mean):
+            fig.add_vline(
+                x=mean,
+                line_color="#EF553B",
+                line_width=2,
+                annotation_text=f"μ = {mean:.3g}",
+                annotation_position="top",
+                annotation_font_color="#EF553B",
+            )
+
+        if pd.notna(std) and std > 0:
+            fig.add_vline(
+                x=mean - std,
+                line_color="#FFA15A",
+                line_dash="dash",
+                line_width=1.5,
+                annotation_text="−1σ",
+                annotation_position="top",
+                annotation_font_color="#FFA15A",
+            )
+            fig.add_vline(
+                x=mean + std,
+                line_color="#FFA15A",
+                line_dash="dash",
+                line_width=1.5,
+                annotation_text="+1σ",
+                annotation_position="top",
+                annotation_font_color="#FFA15A",
+            )
+            fig.update_layout(
+                title=f"Distribution of {column}  —  μ = {mean:.3g}, σ = {std:.3g}"
+            )
+        elif pd.notna(mean):
+            fig.update_layout(
+                title=f"Distribution of {column}  —  μ = {mean:.3g}"
+            )
+
     return fig
 
 
