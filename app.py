@@ -54,16 +54,27 @@ st.markdown(
       /* --- Hide non-essential Streamlit chrome (without breaking the
              collapsed-sidebar expand chevron) --- */
       #MainMenu {visibility: hidden;}
-      footer {visibility: hidden;}
-      [data-testid="stDeployButton"] {display: none;}
+      /* `display: none` (not just hidden) so the footer reclaims its space. */
+      footer {display: none !important;}
+      [data-testid="stDeployButton"] {display: none !important;}
       [data-testid="stToolbarActions"] {visibility: hidden;}
-      [data-testid="stStatusWidget"] {visibility: hidden;}
+      [data-testid="stStatusWidget"] {display: none !important;}
+      [data-testid="stDecoration"] {display: none !important;}
 
-      /* Force the sidebar expand control to stay visible. */
+      /* "Made with Streamlit" / "Hosted with Streamlit" viewer badges.
+         Class names differ across Streamlit versions, so we match any
+         element whose class contains "viewerBadge". */
+      [class*="viewerBadge"] {display: none !important;}
+
+      /* The "Made with Streamlit" link in older builds. */
+      a[href^="https://streamlit.io"][target="_blank"] {display: none !important;}
+
+      /* Force the sidebar expand control to stay visible and on top. */
       [data-testid="stSidebarCollapsedControl"],
       [data-testid="collapsedControl"] {
         visibility: visible !important;
         display: flex !important;
+        z-index: 999 !important;
       }
 
       /* --- Spacing polish --- */
