@@ -24,7 +24,7 @@ from modules import (
     time_series as ts_mod,
     type_detection,
 )
-from utils.helpers import human_bytes, plotly_template, split_columns
+from utils.helpers import human_bytes, split_columns
 
 
 st.set_page_config(
@@ -34,19 +34,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------- Theme bootstrap ----------
-# Reads the theme that was selected on the previous run (default: Light) so
-# the CSS injected below already reflects the user's choice. The actual radio
-# widget is rendered later in the sidebar; switching it triggers a rerun and
-# this block re-evaluates with the new value.
-if "theme" not in st.session_state:
-    st.session_state.theme = "Light"
-_active_theme = st.session_state.theme
-
-# Drive Plotly's *default* template too — chart helpers also read it, but
-# setting it here protects any direct px/go usage we may add later.
+# Single light Plotly template — the dark theme has been removed to keep the
+# render pipeline lightweight on large industrial datasets.
 import plotly.io as pio
-pio.templates.default = "plotly_dark" if _active_theme == "Dark" else "plotly_white"
+pio.templates.default = "plotly_white"
 
 st.markdown(
     """
@@ -118,95 +109,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- Dark-mode overrides (only injected when theme == "Dark") ----------
-if _active_theme == "Dark":
-    st.markdown(
-        """
-        <style>
-          .stApp {
-            background-color: #0E1117;
-            color: #E5E7EB;
-          }
-          .stApp p, .stApp li, .stApp label, .stApp .stMarkdown,
-          .stApp [data-testid="stCaptionContainer"] {
-            color: #E5E7EB;
-          }
-          .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
-            color: #F1F5F9 !important;
-          }
-          [data-testid="stSidebar"] {
-            background-color: #161B22 !important;
-            border-right: 1px solid #21262D;
-          }
-          [data-testid="stSidebar"] *,
-          [data-testid="stSidebar"] label,
-          [data-testid="stSidebar"] .stMarkdown {
-            color: #E5E7EB;
-          }
-          [data-testid="stSidebar"] .cerebulb-product {color: #9CA3AF;}
-          [data-testid="stMetric"] {
-            background: #161B22 !important;
-            border: 1px solid #30363D !important;
-          }
-          [data-testid="stMetricLabel"] {color: #9CA3AF !important;}
-          [data-testid="stMetricValue"] {color: #F1F5F9 !important;}
-          .stTabs [data-baseweb="tab-list"] {
-            border-bottom: 1px solid #30363D;
-          }
-          .stTabs [data-baseweb="tab"] {color: #9CA3AF;}
-          .stTabs [aria-selected="true"] {color: #F1F5F9 !important;}
-          [data-testid="stExpander"] {
-            background-color: #161B22;
-            border: 1px solid #30363D;
-            border-radius: 8px;
-          }
-          [data-testid="stExpander"] summary {color: #E5E7EB;}
-          [data-baseweb="input"] input,
-          [data-baseweb="select"] > div,
-          [data-baseweb="textarea"] textarea {
-            background-color: #161B22 !important;
-            color: #E5E7EB !important;
-            border-color: #30363D !important;
-          }
-          .stButton > button, .stDownloadButton > button {
-            background-color: #21262D;
-            color: #F1F5F9;
-            border: 1px solid #30363D;
-          }
-          .stButton > button:hover, .stDownloadButton > button:hover {
-            background-color: #30363D;
-            border-color: #444C56;
-          }
-          [data-testid="stPlotlyChart"] {background: transparent;}
-          [data-testid="stDataFrame"], [data-testid="stTable"] {
-            background-color: #0E1117;
-          }
-          [data-testid="stAlert"] {
-            background-color: #161B22 !important;
-            border-color: #30363D !important;
-            color: #E5E7EB !important;
-          }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 # ---------- Sidebar ----------
 if LOGO:
     st.sidebar.image(LOGO, width=180)
 st.sidebar.markdown(
     "<div class='cerebulb-product'>Auto EDA Platform</div>",
     unsafe_allow_html=True,
-)
-
-# Theme toggle — value persists in st.session_state.theme via the key.
-st.sidebar.radio(
-    "Theme",
-    options=["Light", "Dark"],
-    horizontal=True,
-    key="theme",
-    help="Switch between light and dark mode. Plotly charts adapt automatically.",
 )
 
 st.sidebar.markdown("Upload a dataset to get started.")
@@ -317,14 +225,18 @@ if df.empty:
 
 
 # ---------- Derived analytics (all on filtered df) ----------
-overview = eda_analysis.dataset_overview(df)
-dtype_info = data_loader.detect_column_types(df)
-missing = data_cleaning.missing_value_summary(df)
-dup_summary = data_cleaning.duplicate_summary(df)
-outliers = data_cleaning.detect_outliers_iqr(df)
-numeric_stats = eda_analysis.numeric_statistics(df)
-categorical_stats = eda_analysis.categorical_statistics(df)
-numeric_cols, categorical_cols, _ = split_columns(df)
+# Every function below is @st.cache_data-wrapped, so this block is heavy only
+# on the FIRST run for a given filtered DataFrame. Subsequent reruns (widget
+# changes, tab switches) return from cache.
+with st.spinner("Computing summary statistics…"):
+    overview = eda_analysis.dataset_overview(df)
+    dtype_info = data_loader.detect_column_types(df)
+    missing = data_cleaning.missing_value_summary(df)
+    dup_summary = data_cleaning.duplicate_summary(df)
+    outliers = data_cleaning.detect_outliers_iqr(df)
+    numeric_stats = eda_analysis.numeric_statistics(df)
+    categorical_stats = eda_analysis.categorical_statistics(df)
+    numeric_cols, categorical_cols, _ = split_columns(df)
 
 
 tabs = st.tabs([
@@ -480,17 +392,19 @@ with tabs[3]:
             else:
                 col = st.selectbox("Column", numeric_cols, key="hist_col")
                 bins = st.slider("Bins", 5, 100, 30)
-                st.plotly_chart(
-                    iviz.histogram(df, col, bins=bins),
-                    use_container_width=True,
-                )
+                with st.spinner("Building histogram…"):
+                    st.pyplot(
+                        iviz.histogram(df, col, bins=bins),
+                        clear_figure=True,
+                    )
 
         elif viz_type == "Boxplot":
             if not numeric_cols:
                 st.info("No numeric columns available.")
             else:
                 col = st.selectbox("Column", numeric_cols, key="box_col")
-                st.plotly_chart(iviz.boxplot(df, col), use_container_width=True)
+                with st.spinner("Building boxplot…"):
+                    st.pyplot(iviz.boxplot(df, col), clear_figure=True)
 
         elif viz_type == "Scatter plot":
             if len(numeric_cols) < 2:
@@ -509,10 +423,11 @@ with tabs[3]:
                     color_options = ["(none)"] + categorical_cols + numeric_cols
                     color = st.selectbox("Colour by", color_options, key="scatter_color")
                 color_col = None if color == "(none)" else color
-                st.plotly_chart(
-                    iviz.scatter(df, x_col, y_col, color=color_col),
-                    use_container_width=True,
-                )
+                with st.spinner("Building scatter plot…"):
+                    st.pyplot(
+                        iviz.scatter(df, x_col, y_col, color=color_col),
+                        clear_figure=True,
+                    )
 
         elif viz_type == "Bar chart (categorical)":
             if not categorical_cols:
@@ -520,13 +435,15 @@ with tabs[3]:
             else:
                 col = st.selectbox("Column", categorical_cols, key="bar_col")
                 top_n = st.slider("Top N values", 3, 30, 10)
-                st.plotly_chart(
-                    iviz.bar_chart(df, col, top_n=top_n),
-                    use_container_width=True,
-                )
+                with st.spinner("Building bar chart…"):
+                    st.pyplot(
+                        iviz.bar_chart(df, col, top_n=top_n),
+                        clear_figure=True,
+                    )
 
         elif viz_type == "Correlation heatmap":
-            fig = iviz.correlation_heatmap(df)
+            with st.spinner("Computing correlations…"):
+                fig = iviz.correlation_heatmap(df)
             if fig is None:
                 st.info("Need at least 2 numeric columns for a correlation heatmap.")
             else:
@@ -560,25 +477,17 @@ with tabs[3]:
                         ),
                     )
 
-                c3, c4 = st.columns(2)
-                with c3:
-                    ml_agg = st.selectbox(
-                        "Aggregation",
-                        ["None", "Daily", "Monthly"],
-                        index=0,
-                        key="ml_agg",
-                        help="Resample (mean) before plotting.",
-                    )
-                with c4:
-                    ml_sample = st.slider(
-                        "Max points",
-                        min_value=500,
-                        max_value=20000,
-                        value=5000,
-                        step=500,
-                        key="ml_sample",
-                        help="Downsample for performance on large datasets.",
-                    )
+                ml_agg = st.selectbox(
+                    "Aggregation",
+                    ["None", "Daily", "Monthly"],
+                    index=0,
+                    key="ml_agg",
+                    help=(
+                        "Aggregate (mean) into Daily or Monthly buckets before "
+                        "plotting. This is data-preserving aggregation, not "
+                        "random sampling. Choose ``None`` to plot every raw row."
+                    ),
+                )
 
                 if not ml_values:
                     st.info("Select at least one numeric column.")
@@ -588,7 +497,6 @@ with tabs[3]:
                         date_col=ml_date,
                         value_cols=ml_values,
                         aggregation=ml_agg,
-                        sample_max=ml_sample,
                     )
                     if fig is None:
                         st.warning(
@@ -711,9 +619,9 @@ with tabs[5]:
             hist_bins = st.slider(
                 "Bins", 5, 100, 30, key="target_hist_bins",
             )
-            st.plotly_chart(
+            st.pyplot(
                 iviz.histogram(df, target, bins=hist_bins),
-                use_container_width=True,
+                clear_figure=True,
             )
 
             # --- Target over time ---
@@ -758,9 +666,9 @@ with tabs[5]:
                     cat_options,
                     key="target_box_cat",
                 )
-                st.plotly_chart(
+                st.pyplot(
                     iviz.grouped_box(df, category=tgt_cat, numeric=target),
-                    use_container_width=True,
+                    clear_figure=True,
                 )
             else:
                 st.caption(
@@ -773,9 +681,9 @@ with tabs[5]:
             top_n = st.slider(
                 "Top N categories", 3, 30, 10, key="target_bar_topn",
             )
-            st.plotly_chart(
+            st.pyplot(
                 iviz.bar_chart(df, target, top_n=top_n),
-                use_container_width=True,
+                clear_figure=True,
             )
 
             # --- Group means + importance ---
@@ -807,9 +715,9 @@ with tabs[5]:
                         key="target_box_features",
                     )
                     for feat in chosen_features:
-                        st.plotly_chart(
+                        st.pyplot(
                             iviz.grouped_box(df, category=target, numeric=feat),
-                            use_container_width=True,
+                            clear_figure=True,
                         )
 
         st.markdown("### Textual insights")

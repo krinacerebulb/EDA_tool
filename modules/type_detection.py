@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 
 # Strings that should be treated as missing rather than as invalid numerics.
@@ -93,6 +94,7 @@ def analyze_object_columns(
     return report
 
 
+@st.cache_data(show_spinner="Detecting types…")
 def apply_smart_conversion(
     df: pd.DataFrame,
     threshold: float = 0.7,

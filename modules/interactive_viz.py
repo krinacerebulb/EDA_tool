@@ -1,101 +1,116 @@
-"""Interactive Plotly-based chart builders.
+"""Chart builders for the Auto EDA tabs.
 
-Each function returns a plotly.graph_objects.Figure that can be rendered
-with st.plotly_chart(fig, use_container_width=True).
+Every chart except ``multi_line_time_series`` returns a **matplotlib**
+``Figure``. Plotly is reserved for the multi-line / dual-axis time series
+view where interactive zoom is genuinely useful. Static matplotlib charts
+ship to the browser as PNG bytes, which is dramatically lighter than
+Plotly's SVG/WebGL renderer on industrial datasets.
+
+**No sampling.** Every chart renders on the complete DataFrame the caller
+passes in. For ML-focused EDA / feature engineering / outlier inspection,
+full-data accuracy matters more than render speed. Rendering is tuned
+instead via small marker sizes, alpha blending, and the matplotlib ``Agg``
+backend — none of which discard rows.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
+
+import matplotlib
+matplotlib.use("Agg")  # server-side rendering, no GUI backend
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import plotly.express as px  # noqa: F401 — kept for parity / future use
 import plotly.graph_objects as go
 
 from utils.helpers import plotly_template
 
 
-def histogram(df: pd.DataFrame, column: str, bins: int = 30) -> go.Figure:
-    """Interactive histogram for a numeric column with mean and ±1σ overlays."""
-    fig = px.histogram(
-        df,
-        x=column,
-        nbins=bins,
-        title=f"Distribution of {column}",
-        marginal="box",
-        opacity=0.85,
-        template=plotly_template(),
-    )
-    fig.update_layout(bargap=0.05, yaxis_title="Frequency")
+# Consistent figure size + base style. Seaborn whitegrid + a slim DPI keeps
+# PNG payloads small and modern-looking.
+_FIG_W = 8
+_FIG_H = 4.5
+_DPI = 100
 
+_BASE_COLOR = "#2C7BE5"
+_ACCENT_COLOR = "#EF553B"
+_BAND_COLOR = "#FFA15A"
+
+
+def _new_axes(figsize=(_FIG_W, _FIG_H)):
+    """Build a fresh (fig, ax) styled consistently across all charts."""
+    sns.set_style("whitegrid", {"axes.edgecolor": "#D1D5DB"})
+    fig, ax = plt.subplots(figsize=figsize, dpi=_DPI)
+    ax.tick_params(axis="both", labelsize=9, colors="#374151")
+    ax.title.set_color("#1F2A37")
+    for spine in ax.spines.values():
+        spine.set_color("#D1D5DB")
+    return fig, ax
+
+
+# --------------------------------------------------------------------- #
+# Static (matplotlib / seaborn) charts
+# --------------------------------------------------------------------- #
+
+def histogram(df: pd.DataFrame, column: str, bins: int = 30) -> plt.Figure:
+    """Histogram with mean and ±1σ overlays, rendered on the full series."""
     series = pd.to_numeric(df[column], errors="coerce").dropna()
+
+    fig, ax = _new_axes()
+    sns.histplot(series, bins=bins, color=_BASE_COLOR, alpha=0.85,
+                 edgecolor="white", ax=ax)
+    ax.set_xlabel(column)
+    ax.set_ylabel("Frequency")
+
+    title = f"Distribution of {column}"
     if not series.empty:
         mean = float(series.mean())
         std = float(series.std()) if len(series) > 1 else float("nan")
 
         if pd.notna(mean):
-            fig.add_vline(
-                x=mean,
-                line_color="#EF553B",
-                line_width=2,
-                annotation_text=f"μ = {mean:.3g}",
-                annotation_position="top",
-                annotation_font_color="#EF553B",
-            )
-
+            ax.axvline(mean, color=_ACCENT_COLOR, linewidth=2,
+                       label=f"μ = {mean:.3g}")
         if pd.notna(std) and std > 0:
-            fig.add_vline(
-                x=mean - std,
-                line_color="#FFA15A",
-                line_dash="dash",
-                line_width=1.5,
-                annotation_text="−1σ",
-                annotation_position="top",
-                annotation_font_color="#FFA15A",
-            )
-            fig.add_vline(
-                x=mean + std,
-                line_color="#FFA15A",
-                line_dash="dash",
-                line_width=1.5,
-                annotation_text="+1σ",
-                annotation_position="top",
-                annotation_font_color="#FFA15A",
-            )
-            fig.update_layout(
-                title=f"Distribution of {column}  —  μ = {mean:.3g}, σ = {std:.3g}"
-            )
+            ax.axvline(mean - std, color=_BAND_COLOR, linewidth=1.4,
+                       linestyle="--", label=f"−1σ ({mean - std:.3g})")
+            ax.axvline(mean + std, color=_BAND_COLOR, linewidth=1.4,
+                       linestyle="--", label=f"+1σ ({mean + std:.3g})")
+            title = f"Distribution of {column}  —  μ = {mean:.3g}, σ = {std:.3g}"
         elif pd.notna(mean):
-            fig.update_layout(
-                title=f"Distribution of {column}  —  μ = {mean:.3g}"
-            )
+            title = f"Distribution of {column}  —  μ = {mean:.3g}"
+        ax.legend(loc="upper right", fontsize=8, frameon=True)
 
+    ax.set_title(title, fontsize=11, fontweight="600")
+    fig.tight_layout()
     return fig
 
 
-def boxplot(df: pd.DataFrame, column: str) -> go.Figure:
-    """Interactive boxplot for a single numeric column."""
-    fig = px.box(
-        df,
-        x=column,
-        points="outliers",
-        title=f"Boxplot of {column}",
-        template=plotly_template(),
-    )
+def boxplot(df: pd.DataFrame, column: str) -> plt.Figure:
+    """Horizontal boxplot for a single numeric column (full data)."""
+    series = df[column].dropna()
+    fig, ax = _new_axes(figsize=(_FIG_W, 2.6))
+    sns.boxplot(x=series, color=_BASE_COLOR, fliersize=2.0, ax=ax)
+    ax.set_xlabel(column)
+    ax.set_title(f"Boxplot of {column}", fontsize=11, fontweight="600")
+    fig.tight_layout()
     return fig
 
 
-def bar_chart(df: pd.DataFrame, column: str, top_n: int = 10) -> go.Figure:
-    """Bar chart of the top-N most frequent categories."""
+def bar_chart(df: pd.DataFrame, column: str, top_n: int = 10) -> plt.Figure:
+    """Horizontal bar chart of the top-N most frequent categories."""
     counts = df[column].dropna().astype(str).value_counts().head(top_n)
-    fig = px.bar(
-        x=counts.values,
-        y=counts.index,
-        orientation="h",
-        title=f"Top {len(counts)} values in {column}",
-        labels={"x": "Count", "y": column},
-        template=plotly_template(),
-    )
-    fig.update_layout(yaxis={"categoryorder": "total ascending"})
+    fig, ax = _new_axes(figsize=(_FIG_W, max(3.0, 0.4 * len(counts) + 1.2)))
+    ax.barh(counts.index[::-1], counts.values[::-1], color=_BASE_COLOR)
+    ax.set_xlabel("Count")
+    ax.set_ylabel(column)
+    ax.set_title(f"Top {len(counts)} values in {column}",
+                 fontsize=11, fontweight="600")
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    fig.tight_layout()
     return fig
 
 
@@ -105,76 +120,139 @@ def scatter(
     y: str,
     color: str | None = None,
     trendline: bool = False,
-) -> go.Figure:
-    """Interactive scatter plot, optionally coloured by a third column."""
-    kwargs = dict(
-        data_frame=df,
-        x=x,
-        y=y,
-        title=f"{y} vs {x}",
-        template=plotly_template(),
-        opacity=0.7,
-    )
-    if color and color in df.columns:
-        kwargs["color"] = color
-    if trendline:
-        kwargs["trendline"] = "ols"
-    try:
-        return px.scatter(**kwargs)
-    except Exception:
-        # statsmodels (needed for trendline) might not be installed.
-        kwargs.pop("trendline", None)
-        return px.scatter(**kwargs)
+) -> plt.Figure:
+    """Scatter plot, optionally coloured by a third column. Full-data.
+
+    Marker size and alpha are tuned to keep dense plots readable on
+    100k+-row inputs without removing any rows. The matplotlib ``Agg``
+    backend rasterises everything server-side, so the browser only ever
+    sees a PNG.
+    """
+    cols = [c for c in [x, y, color] if c and c in df.columns]
+    plot_df = df[cols].dropna(subset=[x, y])
+    n = len(plot_df)
+
+    # Alpha and marker size scale with point count to preserve density
+    # information without discarding rows.
+    if n > 200_000:
+        alpha, marker_size = 0.18, 3
+    elif n > 50_000:
+        alpha, marker_size = 0.28, 4
+    elif n > 10_000:
+        alpha, marker_size = 0.45, 5
+    else:
+        alpha, marker_size = 0.65, 8
+
+    fig, ax = _new_axes()
+    if color and color in plot_df.columns:
+        sns.scatterplot(
+            data=plot_df, x=x, y=y, hue=color,
+            palette="tab10", s=marker_size, alpha=alpha,
+            edgecolor="none", linewidth=0, ax=ax,
+        )
+        ax.legend(loc="best", fontsize=8, frameon=True, title=color)
+    else:
+        ax.scatter(
+            plot_df[x], plot_df[y],
+            s=marker_size, alpha=alpha, color=_BASE_COLOR,
+            edgecolors="none", linewidths=0,
+        )
+
+    if trendline and n >= 2:
+        try:
+            xs = pd.to_numeric(plot_df[x], errors="coerce")
+            ys = pd.to_numeric(plot_df[y], errors="coerce")
+            mask = xs.notna() & ys.notna()
+            if mask.sum() >= 2:
+                slope, intercept = np.polyfit(xs[mask], ys[mask], 1)
+                xline = np.linspace(xs[mask].min(), xs[mask].max(), 100)
+                ax.plot(xline, slope * xline + intercept,
+                        color=_ACCENT_COLOR, linewidth=1.8,
+                        label=f"y = {slope:.3g}·x + {intercept:.3g}")
+                ax.legend(loc="best", fontsize=8)
+        except Exception:
+            pass
+
+    ax.set_xlabel(x)
+    ax.set_ylabel(y)
+    ax.set_title(f"{y} vs {x}", fontsize=11, fontweight="600")
+    fig.tight_layout()
+    return fig
 
 
 def correlation_heatmap(df: pd.DataFrame) -> go.Figure | None:
-    """Interactive correlation heatmap of numeric columns."""
+    """Interactive Plotly correlation heatmap on every numeric column.
+
+    Plotly is used here (rather than matplotlib) so users can hover any cell
+    to read the exact correlation value, zoom into a sub-block of features,
+    and pan across wide matrices — useful for ML feature-selection workflows.
+
+    Inline cell annotations are auto-suppressed on wide matrices so the grid
+    stays readable; values remain visible on hover regardless of size.
+    """
     numeric = df.select_dtypes(include=[np.number])
     if numeric.shape[1] < 2:
         return None
 
     corr = numeric.corr().round(3)
+    n = corr.shape[0]
+
+    # Inline annotations off past ~25 columns — values stay on hover anyway.
+    text_auto: str | bool = ".2f" if n <= 25 else False
+
+    # Height scales with column count so labels don't crush together.
+    height = max(420, min(1100, 28 * n + 160))
+
     fig = px.imshow(
         corr,
-        text_auto=True,
+        text_auto=text_auto,
         color_continuous_scale="RdBu_r",
-        zmin=-1,
-        zmax=1,
+        zmin=-1, zmax=1,
         aspect="auto",
-        title="Correlation Heatmap",
+        title=f"Correlation Heatmap  ({n} numeric columns)",
         template=plotly_template(),
     )
-    fig.update_layout(coloraxis_colorbar=dict(title="corr"))
+    fig.update_layout(
+        coloraxis_colorbar=dict(title="corr"),
+        margin=dict(l=10, r=10, t=60, b=10),
+        height=height,
+    )
+    fig.update_xaxes(tickangle=45, tickfont=dict(size=10))
+    fig.update_yaxes(tickfont=dict(size=10))
     return fig
 
 
-def grouped_box(df: pd.DataFrame, category: str, numeric: str) -> go.Figure:
-    """Boxplot of a numeric column grouped by a categorical column."""
-    fig = px.box(
-        df,
-        x=category,
-        y=numeric,
-        points="outliers",
-        title=f"{numeric} by {category}",
-        template=plotly_template(),
+def grouped_box(df: pd.DataFrame, category: str, numeric: str) -> plt.Figure:
+    """Boxplot of a numeric column grouped by a categorical column. Full data.
+
+    Every group present in the data is plotted. Figure width scales with the
+    group count so labels stay readable even on high-cardinality categories.
+    """
+    sub = df[[category, numeric]].dropna()
+    n_groups = sub[category].astype(str).nunique()
+    width = max(_FIG_W, min(24, 0.4 * n_groups + 4))
+
+    fig, ax = _new_axes(figsize=(width, 4.5))
+    sns.boxplot(
+        data=sub, x=category, y=numeric,
+        color=_BASE_COLOR, fliersize=2.0, ax=ax,
     )
-    fig.update_layout(xaxis_tickangle=-30)
+    ax.set_title(f"{numeric} by {category}", fontsize=11, fontweight="600")
+    ax.tick_params(axis="x", labelrotation=30)
+    plt.setp(ax.get_xticklabels(), ha="right", rotation_mode="anchor")
+    fig.tight_layout()
     return fig
 
 
 # --------------------------------------------------------------------- #
-# Multi-line / dual-axis time series
+# Multi-line / dual-axis time series — kept as Plotly for interactivity
 # --------------------------------------------------------------------- #
 
-# Colour palette for multi-line traces (Plotly default sequence).
 _LINE_COLORS = [
     "#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A",
     "#19D3F3", "#FF6692", "#B6E880", "#FF97FF", "#FECB52",
 ]
 
-# Threshold for engaging the secondary y-axis. If max(scale)/min(scale)
-# across selected columns exceeds this, the smaller-scale columns get
-# pushed onto a secondary axis so all lines remain visible.
 _DUAL_AXIS_RATIO = 10.0
 
 
@@ -184,11 +262,6 @@ def _aggregate_time_series(
     value_cols: list[str],
     freq: str | None,
 ) -> pd.DataFrame:
-    """Aggregate (mean) by the given pandas offset freq, or return as-is.
-
-    ``freq`` is ``"D"`` for daily, ``"MS"`` for month-start, or ``None`` to
-    keep the raw rows.
-    """
     work = df[[date_col, *value_cols]].copy()
     work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
     for col in value_cols:
@@ -209,12 +282,6 @@ def _split_axis_groups(
     work: pd.DataFrame,
     value_cols: list[str],
 ) -> tuple[list[str], list[str]]:
-    """Decide which columns belong on primary vs secondary y-axis.
-
-    A column's "scale" is the median absolute value. If max/min across
-    columns exceeds ``_DUAL_AXIS_RATIO``, columns at or below the geometric
-    mean go on the primary axis and the rest on the secondary axis.
-    """
     scales: dict[str, float] = {}
     for col in value_cols:
         s = work[col].dropna().abs()
@@ -235,7 +302,6 @@ def _split_axis_groups(
     threshold = (smallest * largest) ** 0.5
     primary = [c for c in value_cols if scales.get(c, threshold) <= threshold]
     secondary = [c for c in value_cols if c not in primary]
-    # Edge case: all columns landed on one side (e.g. ties at threshold).
     if not secondary or not primary:
         return list(value_cols), []
     return primary, secondary
@@ -246,18 +312,13 @@ def multi_line_time_series(
     date_col: str,
     value_cols: list[str],
     aggregation: str = "None",
-    sample_max: int = 10000,
 ) -> go.Figure | None:
-    """Plot multiple numeric columns over time, with auto dual-axis.
+    """Interactive multi-line time series with optional dual y-axis.
 
-    Parameters
-    ----------
-    aggregation : "None" | "Daily" | "Monthly"
-        Resample to daily (``"D"``) or month-start (``"MS"``) means before
-        plotting. ``"None"`` keeps raw rows.
-    sample_max : int
-        If the prepared frame still has more rows than this, evenly sample
-        ``sample_max`` rows so plotting stays responsive.
+    Stays on Plotly so users can zoom and brush across long industrial time
+    series. ``aggregation`` ("Daily" / "Monthly") deterministically resamples
+    by mean — this is *aggregation*, not random sampling, and is fully
+    user-controlled. With ``aggregation="None"`` every raw row is plotted.
     """
     if not value_cols:
         return None
@@ -268,10 +329,6 @@ def multi_line_time_series(
     work = _aggregate_time_series(df, date_col, value_cols, freq)
     if work.empty:
         return None
-
-    if len(work) > sample_max:
-        idx = np.linspace(0, len(work) - 1, sample_max).astype(int)
-        work = work.iloc[idx].reset_index(drop=True)
 
     primary, secondary = _split_axis_groups(work, value_cols)
 

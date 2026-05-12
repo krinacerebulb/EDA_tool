@@ -1,9 +1,15 @@
-"""Descriptive statistics for numeric and categorical columns."""
+"""Descriptive statistics for numeric and categorical columns.
+
+Public functions are wrapped in ``@st.cache_data`` so heavy stats are computed
+once per DataFrame content-hash and reused across reruns.
+"""
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 
+@st.cache_data(show_spinner=False)
 def dataset_overview(df: pd.DataFrame) -> dict:
     """High-level facts about the dataset."""
     return {
@@ -14,6 +20,7 @@ def dataset_overview(df: pd.DataFrame) -> dict:
     }
 
 
+@st.cache_data(show_spinner=False)
 def numeric_statistics(df: pd.DataFrame) -> pd.DataFrame:
     """Mean, median, std, min, max (and a few extras) for numeric columns."""
     numeric = df.select_dtypes(include=[np.number])
@@ -32,6 +39,7 @@ def numeric_statistics(df: pd.DataFrame) -> pd.DataFrame:
     return stats.reset_index()
 
 
+@st.cache_data(show_spinner=False)
 def categorical_statistics(df: pd.DataFrame, top_n: int = 5) -> dict:
     """
     For each categorical column, return a small DataFrame of the top-N

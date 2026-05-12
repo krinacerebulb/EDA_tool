@@ -1,13 +1,16 @@
 """Cleaning-focused analysis: missing values, duplicates, outliers.
 
 This module DOES NOT modify the DataFrame. It only reports findings so the user
-can decide what to do.
+can decide what to do. Results are cached per-DataFrame to keep large-dataset
+re-renders responsive.
 """
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 
+@st.cache_data(show_spinner=False)
 def missing_value_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Per-column count and percentage of missing values, sorted descending."""
     missing = df.isna().sum()
@@ -20,6 +23,7 @@ def missing_value_summary(df: pd.DataFrame) -> pd.DataFrame:
     return summary.sort_values("Missing %", ascending=False).reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False)
 def duplicate_summary(df: pd.DataFrame) -> dict:
     """Total and percentage of duplicated rows."""
     total = int(df.duplicated().sum())
@@ -27,6 +31,7 @@ def duplicate_summary(df: pd.DataFrame) -> dict:
     return {"duplicate_rows": total, "duplicate_percent": percent}
 
 
+@st.cache_data(show_spinner=False)
 def detect_outliers_iqr(df: pd.DataFrame) -> pd.DataFrame:
     """
     Flag outliers per numeric column using the IQR rule:

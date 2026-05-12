@@ -35,16 +35,34 @@ def human_bytes(num: int) -> str:
 
 
 def plotly_template() -> str:
-    """Return the active Plotly template based on the user's theme choice.
-
-    Reads ``st.session_state['theme']`` if Streamlit is available; defaults to
-    the light template otherwise. Safe to call from non-UI modules.
-    """
-    try:
-        import streamlit as st
-
-        if st.session_state.get("theme") == "Dark":
-            return "plotly_dark"
-    except Exception:
-        pass
+    """Return the active Plotly template. Light theme only."""
     return "plotly_white"
+
+
+def compress_strings_to_category(
+    df: pd.DataFrame,
+    max_unique_ratio: float = 0.5,
+    min_rows: int = 1000,
+) -> pd.DataFrame:
+    """Convert low-cardinality object columns to ``category`` in-place-by-return.
+
+    Big win for memory on industrial datasets: a 500k-row column with 100
+    unique strings drops from ~25 MB to a few hundred KB. Downstream code
+    that uses ``select_dtypes(include=["object", "category", "bool"])`` still
+    sees the column, so behaviour is preserved.
+
+    Skipped automatically for small DataFrames (below ``min_rows``) where the
+    overhead wouldn't pay off.
+    """
+    if len(df) < min_rows:
+        return df
+    object_cols = df.select_dtypes(include=["object"]).columns
+    if object_cols.empty:
+        return df
+    for col in object_cols:
+        nunique = df[col].nunique(dropna=True)
+        if nunique == 0:
+            continue
+        if nunique / len(df) <= max_unique_ratio:
+            df[col] = df[col].astype("category")
+    return df

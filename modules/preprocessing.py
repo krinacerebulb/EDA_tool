@@ -67,12 +67,19 @@ def safe_convert(series: pd.Series, target_dtype: str):
     return converted, new_na, None
 
 
+@st.cache_data(show_spinner=False)
 def apply_preprocessing(
     df: pd.DataFrame,
-    dropped_cols: list[str],
-    manual_dtypes: dict[str, str],
+    dropped_cols: tuple,
+    manual_dtypes_items: tuple,
 ):
-    """Apply column drops and dtype conversions; return (df, warnings)."""
+    """Apply column drops and dtype conversions; return (df, warnings).
+
+    Args are tuples (rather than ``list`` / ``dict``) so this function can be
+    safely memoised by ``st.cache_data`` — tuples are hashable in a stable
+    way and behave well as cache keys.
+    """
+    manual_dtypes = dict(manual_dtypes_items)
     out = df.copy()
     warnings: list[str] = []
 
@@ -180,10 +187,11 @@ def render_preprocessing_ui(df: pd.DataFrame) -> pd.DataFrame:
             st.rerun()
 
     # Apply outside the expander so warnings show inline on the main page.
+    # Tuples make the call cacheable across reruns.
     out, warnings = apply_preprocessing(
         df,
-        list(st.session_state.dropped_cols),
-        dict(st.session_state.manual_dtypes),
+        tuple(st.session_state.dropped_cols),
+        tuple(sorted(st.session_state.manual_dtypes.items())),
     )
     for msg in warnings:
         st.warning(msg)

@@ -14,12 +14,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
 
 from utils.helpers import plotly_template
 
 
 _DATETIME_PARSE_THRESHOLD = 0.7  # % of sampled values that must parse
 _SAMPLE_LIMIT = 500              # cap for detection to keep things responsive
+_QUICK_CHECK_SIZE = 8            # values tested in the cheap pre-filter
 
 # Strategies tried in order; we keep the parse with the highest success rate.
 # Covers: ISO datetimes, datetimes with milliseconds, time-only strings,
@@ -33,6 +35,23 @@ _PARSE_STRATEGIES: list[dict] = [
     {"format": "%d-%m-%Y %H:%M:%S"},
     {"format": "%d/%m/%Y %H:%M:%S"},
 ]
+
+
+def _looks_like_datetime(series: pd.Series) -> bool:
+    """Cheap heuristic: do any of the first few values parse as a datetime?
+
+    Used as a pre-filter so wide datasets full of free-text columns don't pay
+    the cost of the full multi-strategy parse on columns that obviously
+    aren't dates (names, addresses, IDs, etc.).
+    """
+    sample = series.dropna().head(_QUICK_CHECK_SIZE)
+    if sample.empty:
+        return False
+    try:
+        parsed = pd.to_datetime(sample, errors="coerce")
+    except Exception:
+        return False
+    return bool(parsed.notna().any())
 
 
 def _best_parse(series: pd.Series):
@@ -64,6 +83,7 @@ def _best_parse(series: pd.Series):
     return best_parsed, best_rate
 
 
+@st.cache_data(show_spinner=False)
 def detect_datetime_columns(df: pd.DataFrame) -> list[str]:
     """Return column names that are datetime or parseable as datetime.
 
@@ -87,12 +107,16 @@ def detect_datetime_columns(df: pd.DataFrame) -> list[str]:
             continue
         if s.dtype not in ("object", "string"):
             continue
+        # Cheap pre-filter to skip clearly-non-datetime free-text columns.
+        if not _looks_like_datetime(s):
+            continue
         _, rate = _best_parse(s)
         if rate >= _DATETIME_PARSE_THRESHOLD:
             found.append(col)
     return found
 
 
+@st.cache_data(show_spinner=False)
 def datetime_detection_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Tabular summary of datetime-like columns.
 
@@ -117,6 +141,8 @@ def datetime_detection_summary(df: pd.DataFrame) -> pd.DataFrame:
             continue
         non_null = s.dropna()
         if non_null.empty:
+            continue
+        if not _looks_like_datetime(s):
             continue
         parsed, rate = _best_parse(s)
         if parsed is None or rate < 0.5:
@@ -157,18 +183,22 @@ def time_series_plot(
     value_col: str,
     rolling_window: int | None = None,
 ) -> go.Figure:
-    """Interactive line chart with zoom, hover, range slider, and smoothing."""
+    """Interactive line chart with zoom, hover, range slider, and smoothing.
+
+    Plots every row of ``prepared`` — no downsampling. ``mode="lines"`` (no
+    per-point markers) keeps Plotly responsive on long industrial series
+    without discarding any data.
+    """
     fig = go.Figure()
 
     fig.add_trace(
         go.Scatter(
             x=prepared[date_col],
             y=prepared[value_col],
-            mode="lines+markers",
+            mode="lines",
             name=value_col,
             line=dict(color="#636EFA", width=1.5),
-            marker=dict(size=4),
-            opacity=0.75,
+            opacity=0.85,
             hovertemplate=f"{date_col}: %{{x}}<br>{value_col}: %{{y}}<extra></extra>",
         )
     )

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 
 # --------------------------------------------------------------------- #
@@ -29,6 +30,7 @@ def is_numeric_target(df: pd.DataFrame, target: str) -> bool:
 # Numeric target
 # --------------------------------------------------------------------- #
 
+@st.cache_data(show_spinner=False)
 def correlations_with_target(df: pd.DataFrame, target: str) -> pd.DataFrame:
     """Pearson correlation of every numeric feature with the target.
 
@@ -58,6 +60,7 @@ def correlations_with_target(df: pd.DataFrame, target: str) -> pd.DataFrame:
 # Categorical target
 # --------------------------------------------------------------------- #
 
+@st.cache_data(show_spinner=False)
 def group_means(df: pd.DataFrame, target: str) -> pd.DataFrame:
     """Mean of each numeric feature, grouped by the categorical target."""
     if is_numeric_target(df, target):
@@ -71,6 +74,7 @@ def group_means(df: pd.DataFrame, target: str) -> pd.DataFrame:
     return grouped.round(3).reset_index()
 
 
+@st.cache_data(show_spinner=False)
 def categorical_importance(df: pd.DataFrame, target: str) -> pd.DataFrame:
     """
     Rank numeric features by how much their group means differ across
