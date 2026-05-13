@@ -26,12 +26,12 @@ def split_columns(df: pd.DataFrame):
 
 
 def human_bytes(num: int) -> str:
-    """Format a byte count into a human-readable string."""
+    """Format a byte count into a human-readable string (always 2 decimals)."""
     for unit in ["B", "KB", "MB", "GB"]:
         if num < 1024.0:
-            return f"{num:.1f} {unit}"
+            return f"{num:.2f} {unit}"
         num /= 1024.0
-    return f"{num:.1f} TB"
+    return f"{num:.2f} TB"
 
 
 def plotly_template() -> str:

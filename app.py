@@ -737,11 +737,32 @@ with tabs[6]:
 # ---------- Report ----------
 with tabs[7]:
     st.subheader("Downloadable HTML Report")
-    st.write("Generate a single-file HTML report covering overview, stats, insights, and charts.")
+    st.write(
+        "Generate a clean executive-style HTML report — dataset overview, "
+        "column health, time range, basic statistics, and a correlation heatmap."
+    )
     st.caption(
         "The report is built from the **currently filtered** data — "
-        "adjust filters in the sidebar first if you want a subset."
+        "adjust filters in the sidebar first if you want a subset. "
+        "To save as PDF, open the downloaded HTML in a browser and use "
+        "**Print → Save as PDF**."
     )
+
+    with st.expander("Branding (optional)", expanded=False):
+        b1, b2 = st.columns(2)
+        with b1:
+            report_title = st.text_input(
+                "Report title",
+                value="Auto EDA Report",
+                key="report_title",
+            )
+        with b2:
+            company_name = st.text_input(
+                "Company / team name",
+                value="",
+                key="report_company",
+                help="Shown above the title. Leave blank to omit.",
+            )
 
     if st.button("Generate report"):
         with st.spinner("Building report..."):
@@ -752,7 +773,10 @@ with tabs[7]:
                 dtype_info=dtype_info,
                 missing=missing,
                 numeric_stats=numeric_stats,
-                insights=insight_lines,
+                dup_count=dup_summary["duplicate_rows"],
+                company_name=company_name.strip() or None,
+                report_title=report_title.strip() or "Auto EDA Report",
+                logo_path=LOGO,
             )
         st.success("Report ready.")
         st.download_button(
