@@ -254,7 +254,7 @@ tabs = st.tabs([
 # ---------- Overview ----------
 with tabs[0]:
     st.subheader("Dataset Preview")
-    st.dataframe(df.head(preview_rows), use_container_width=True)
+    st.dataframe(df.head(preview_rows), width="stretch")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rows", f"{overview['rows']:,}")
@@ -263,7 +263,7 @@ with tabs[0]:
     c4.metric("Missing values", f"{overview['total_missing']:,}")
 
     st.subheader("Column Types")
-    st.dataframe(dtype_info, use_container_width=True)
+    st.dataframe(dtype_info, width="stretch")
 
     st.subheader("Download dataset")
     dl1, dl2 = st.columns(2)
@@ -299,7 +299,7 @@ with tabs[1]:
         st.caption("No object columns were found in this dataset.")
     else:
         summary_frame = type_detection.conversion_summary_frame(conversion_report)
-        st.dataframe(summary_frame, use_container_width=True)
+        st.dataframe(summary_frame, width="stretch")
 
         examples = [e for e in conversion_report if e["convertible"] and e["invalid_examples"]]
         if examples:
@@ -326,7 +326,7 @@ with tabs[1]:
             "you know it should be parsed that way."
         )
     else:
-        st.dataframe(dt_summary, use_container_width=True)
+        st.dataframe(dt_summary, width="stretch")
         st.caption(
             "Confidence is the share of non-null values that parsed as a "
             "valid date/time. Invalid counts are estimated when sampling "
@@ -335,7 +335,7 @@ with tabs[1]:
 
     st.markdown("---")
     st.subheader("Missing Values")
-    st.dataframe(missing, use_container_width=True)
+    st.dataframe(missing, width="stretch")
 
     st.subheader("Duplicates")
     st.write(
@@ -347,7 +347,7 @@ with tabs[1]:
     if outliers.empty:
         st.info("No numeric columns to check for outliers.")
     else:
-        st.dataframe(outliers, use_container_width=True)
+        st.dataframe(outliers, width="stretch")
 
     st.caption("Note: nothing is modified automatically — this is analysis only.")
 
@@ -355,10 +355,14 @@ with tabs[1]:
 # ---------- Statistics ----------
 with tabs[2]:
     st.subheader("Numeric Columns")
+    st.caption(
+        "Full `describe()`-style summary plus missing %, unique count, "
+        "skewness, and kurtosis. All values rounded to two decimals."
+    )
     if numeric_stats.empty:
         st.info("No numeric columns detected.")
     else:
-        st.dataframe(numeric_stats, use_container_width=True)
+        st.dataframe(numeric_stats, width="stretch", hide_index=True)
 
     st.subheader("Categorical Columns")
     if not categorical_stats:
@@ -366,7 +370,23 @@ with tabs[2]:
     else:
         for col, info in categorical_stats.items():
             with st.expander(f"{col}  —  {info['unique']} unique, mode: {info['mode']}"):
-                st.dataframe(info["top_values"], use_container_width=True)
+                st.dataframe(info["top_values"], width="stretch", hide_index=True)
+
+    # ---- Column drilldown ----
+    st.markdown("---")
+    st.subheader("Column Drilldown")
+    st.caption("Pick any column for its full statistical profile.")
+    drill_col = st.selectbox(
+        "Column",
+        options=["(select)"] + list(df.columns),
+        key="stats_drill_col",
+    )
+    if drill_col != "(select)":
+        detail_df = eda_analysis.column_detail_stats(df, drill_col)
+        if detail_df.empty:
+            st.info("No detail available for the selected column.")
+        else:
+            st.dataframe(detail_df, width="stretch", hide_index=True)
 
 
 # ---------- Visualizations (interactive Plotly) ----------
@@ -447,7 +467,7 @@ with tabs[3]:
             if fig is None:
                 st.info("Need at least 2 numeric columns for a correlation heatmap.")
             else:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         elif viz_type == "Multi-line time series":
             datetime_cols_viz = ts_mod.detect_datetime_columns(df)
@@ -504,7 +524,7 @@ with tabs[3]:
                             "Check that it contains valid dates."
                         )
                     else:
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
 
 # ---------- Time Series ----------
@@ -565,7 +585,7 @@ with tabs[4]:
                 ts_mod.time_series_plot(
                     prepared, date_col, value_col, rolling_window=rolling_window,
                 ),
-                use_container_width=True,
+                width="stretch",
             )
 
             st.markdown("### 🔎 Trend insights")
@@ -596,11 +616,47 @@ with tabs[5]:
             f"(`{df[target].dtype}`)"
         )
 
+        # ---- Target summary cards ----
+        tgt_summary = target_analysis.target_summary(df, target)
+        if tgt_summary:
+            tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+            tc1.metric("Total values", f"{tgt_summary['total']:,}")
+            tc2.metric(
+                "Missing",
+                f"{tgt_summary['missing']:,}",
+                f"{tgt_summary['missing_pct']:.2f}%",
+            )
+            if numeric_target and tgt_summary.get("mean") is not None:
+                tc3.metric("Mean",   f"{tgt_summary['mean']:.2f}")
+                tc4.metric("Median", f"{tgt_summary['median']:.2f}")
+                tc5.metric("Std",    f"{tgt_summary['std']:.2f}")
+            else:
+                tc3.metric("Unique classes", f"{tgt_summary['unique']:,}")
+                tc4.metric(
+                    "Most frequent",
+                    str(tgt_summary.get("top_value", "—")),
+                )
+                tc5.metric(
+                    "Top frequency",
+                    f"{tgt_summary.get('top_freq', 0):,}",
+                    f"{tgt_summary.get('top_pct', 0):.2f}%",
+                )
+            with st.expander("Full target statistics", expanded=False):
+                st.dataframe(
+                    tgt_summary["detail"], width="stretch", hide_index=True,
+                )
+                if not numeric_target and "class_distribution" in tgt_summary:
+                    st.markdown("**Class distribution**")
+                    st.dataframe(
+                        tgt_summary["class_distribution"],
+                        width="stretch", hide_index=True,
+                    )
+
         if numeric_target:
             corr_df = target_analysis.correlations_with_target(df, target)
             if not corr_df.empty:
                 st.markdown("### Correlation with target")
-                st.dataframe(corr_df, use_container_width=True)
+                st.dataframe(corr_df, width="stretch")
 
                 strongest = corr_df.iloc[0]
                 st.markdown(
@@ -651,7 +707,7 @@ with tabs[5]:
                         "no rows left to plot."
                     )
                 else:
-                    st.plotly_chart(line_fig, use_container_width=True)
+                    st.plotly_chart(line_fig, width="stretch")
             else:
                 st.caption(
                     "No datetime column detected — skipping target-over-time plot."
@@ -692,11 +748,11 @@ with tabs[5]:
                 st.info("No numeric features to compare across the target groups.")
             else:
                 st.markdown(f"### Mean of numeric features per **{target}**")
-                st.dataframe(means_df, use_container_width=True)
+                st.dataframe(means_df, width="stretch")
 
                 imp_df = target_analysis.categorical_importance(df, target)
                 st.markdown("### Most influential features")
-                st.dataframe(imp_df, use_container_width=True)
+                st.dataframe(imp_df, width="stretch")
 
                 if not imp_df.empty:
                     top_feature = imp_df.iloc[0]["Feature"]

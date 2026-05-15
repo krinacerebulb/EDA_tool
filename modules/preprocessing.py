@@ -438,32 +438,16 @@ def _render_dt_string(df: pd.DataFrame) -> None:
             "using the tokens shown in the caption."
         )
 
-    st.markdown("**Format builder**")
-    st.caption(
-        "Tokens: `YYYY` year · `MM` month · `DD` day · `HH` hour (24h) · "
-        "`mm` minute · `ss` second · `ms` millisecond. Mix with `-`, `/`, "
-        "`:`, `.`, space, `T` as separators."
-    )
-    builder_input = st.text_input(
-        "Format string",
-        key="dtfmt_builder_input",
-        placeholder="YYYY-MM-DD HH:mm:ss",
-        help=(
-            "Example: `YYYY-MM-DD HH:mm:ss` → matches "
-            "`2025-05-12 14:22:45`. Leave empty for pandas auto-inference."
-        ),
-    )
-    python_fmt = dtfmt.builder_to_python(builder_input).strip()
-    if not python_fmt:
-        st.caption(
-            "No format specified — falling back to pandas auto-inference "
-            "(less reliable on industrial data)."
-        )
+    # The "Use" buttons above stash the chosen builder label in
+    # session_state. No raw textbox — when nothing's been picked yet we
+    # fall back to pandas auto-inference.
+    builder_label = st.session_state.get("dtfmt_builder_input", "")
+    python_fmt = dtfmt.builder_to_python(builder_label).strip()
 
     parsed_series, stats = dtfmt.parse_with_format(series, python_fmt or None)
     preview_df = dtfmt.preview_frame(series.dropna(), parsed_series, n=10)
     st.markdown("**Live preview**")
-    st.dataframe(preview_df, use_container_width=True)
+    st.dataframe(preview_df, width="stretch")
 
     pc1, pc2, pc3, pc4 = st.columns(4)
     pc1.metric("Total rows", f"{stats['total']:,}")
@@ -488,7 +472,7 @@ def _render_dt_string(df: pd.DataFrame) -> None:
                 .rename_axis("Raw Value")
                 .reset_index(name="Occurrences")
             )
-            st.dataframe(unique_failed, use_container_width=True, hide_index=True)
+            st.dataframe(unique_failed, width="stretch", hide_index=True)
             st.caption(
                 f"Top 20 distinct values out of {failed_rows.nunique():,} "
                 "unique unparseable entries."
@@ -582,7 +566,7 @@ def _render_dt_numeric(df: pd.DataFrame) -> None:
             .astype("string").fillna("(unparsed)").values,
     })
     st.markdown("**Live preview**")
-    st.dataframe(preview_num, use_container_width=True)
+    st.dataframe(preview_num, width="stretch")
 
     nc1, nc2, nc3, nc4 = st.columns(4)
     nc1.metric("Total rows", f"{num_stats['total']:,}")
@@ -608,7 +592,7 @@ def _render_dt_numeric(df: pd.DataFrame) -> None:
                 .reset_index(name="Occurrences")
             )
             st.dataframe(
-                unique_failed_num, use_container_width=True, hide_index=True,
+                unique_failed_num, width="stretch", hide_index=True,
             )
 
     if st.button("Apply conversion", key=f"dtfmt_num_apply_{num_target}"):
@@ -681,7 +665,7 @@ def _render_dt_merge(df: pd.DataFrame) -> None:
         "Combined": combined.head(10).astype("string").fillna("(unparsed)").values,
     })
     st.markdown("**Live preview**")
-    st.dataframe(preview, use_container_width=True)
+    st.dataframe(preview, width="stretch")
 
     sc1, sc2, sc3 = st.columns(3)
     sc1.metric("Parsed", f"{stats['parsed']:,}")
@@ -775,7 +759,7 @@ def _render_missing_section(df: pd.DataFrame) -> None:
         "Missing %":  [f"{df[c].isna().mean() * 100:.2f}%" for c in miss_cols],
         "Dtype":      [str(df[c].dtype) for c in miss_cols],
     })
-    st.dataframe(miss_summary, use_container_width=True, hide_index=True)
+    st.dataframe(miss_summary, width="stretch", hide_index=True)
 
     c1, c2 = st.columns([3, 3])
     with c1:
@@ -848,7 +832,7 @@ def _render_preview_section(df_in: pd.DataFrame, df_out: pd.DataFrame) -> None:
         [(k, v) for k, v in op_counts.items() if v > 0],
         columns=["Operation", "Count"],
     )
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.dataframe(summary_df, width="stretch", hide_index=True)
 
     # --- Before / after diff ---
     in_cols = list(df_in.columns)
@@ -882,7 +866,7 @@ def _render_preview_section(df_in: pd.DataFrame, df_out: pd.DataFrame) -> None:
         if dtype_rows:
             st.dataframe(
                 pd.DataFrame(dtype_rows),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
 
         # Side-by-side first-5-rows preview of columns whose dtype changed
@@ -898,13 +882,13 @@ def _render_preview_section(df_in: pd.DataFrame, df_out: pd.DataFrame) -> None:
                 if in_cols_to_show:
                     st.dataframe(
                         df_in[in_cols_to_show].head(5),
-                        use_container_width=True,
+                        width="stretch",
                     )
                 else:
                     st.caption("All listed columns are newly created.")
             with pc2:
                 st.markdown("Processed")
-                st.dataframe(df_out[sample_cols].head(5), use_container_width=True)
+                st.dataframe(df_out[sample_cols].head(5), width="stretch")
 
     # --- Active rules with Remove buttons ---
     st.markdown("---")

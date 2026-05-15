@@ -27,6 +27,119 @@ def is_numeric_target(df: pd.DataFrame, target: str) -> bool:
 
 
 # --------------------------------------------------------------------- #
+# Target summary cards / detail
+# --------------------------------------------------------------------- #
+
+@st.cache_data(show_spinner=False)
+def target_summary(df: pd.DataFrame, target: str) -> dict:
+    """Structured stats for the selected target column.
+
+    Returns a dict ready to drive Streamlit cards + a detail table. Shape
+    depends on whether the target is numeric:
+
+    Numeric target:
+        {is_numeric: True, total, missing, missing_pct, unique,
+         mean, median, std, min, q25, q75, max, skew, kurtosis,
+         detail: pd.DataFrame[Metric, Value]}
+
+    Categorical target:
+        {is_numeric: False, total, missing, missing_pct, unique,
+         top_value, top_freq, top_pct,
+         class_distribution: pd.DataFrame[Class, Count, %],
+         detail: pd.DataFrame[Metric, Value]}
+    """
+    if target not in df.columns:
+        return {}
+
+    s = df[target]
+    n = len(s)
+    miss = int(s.isna().sum())
+    miss_pct = (miss / n * 100) if n else 0.0
+    unique = int(s.nunique(dropna=True))
+    non_null = s.dropna()
+    is_num = pd.api.types.is_numeric_dtype(s)
+
+    out: dict = {
+        "is_numeric":  is_num,
+        "total":       n,
+        "missing":     miss,
+        "missing_pct": round(miss_pct, 2),
+        "unique":      unique,
+    }
+
+    if is_num and not non_null.empty:
+        q1 = float(non_null.quantile(0.25))
+        q2 = float(non_null.quantile(0.50))
+        q3 = float(non_null.quantile(0.75))
+        mn, mx = float(non_null.min()), float(non_null.max())
+        skew = float(non_null.skew()) if len(non_null) > 2 else float("nan")
+        kurt = float(non_null.kurt()) if len(non_null) > 3 else float("nan")
+        out.update({
+            "mean":     round(float(non_null.mean()), 2),
+            "median":   round(q2, 2),
+            "std":      round(float(non_null.std()), 2),
+            "min":      round(mn, 2),
+            "q25":      round(q1, 2),
+            "q75":      round(q3, 2),
+            "max":      round(mx, 2),
+            "skew":     round(skew, 2) if not np.isnan(skew) else float("nan"),
+            "kurtosis": round(kurt, 2) if not np.isnan(kurt) else float("nan"),
+        })
+        out["detail"] = pd.DataFrame([
+            ("Count",     f"{int(non_null.count()):,}"),
+            ("Missing",   f"{miss:,}"),
+            ("Missing %", f"{miss_pct:.2f}%"),
+            ("Unique",    f"{unique:,}"),
+            ("Mean",      f"{out['mean']:.2f}"),
+            ("Std",       f"{out['std']:.2f}"),
+            ("Min",       f"{out['min']:.2f}"),
+            ("25%",       f"{out['q25']:.2f}"),
+            ("50%",       f"{out['median']:.2f}"),
+            ("75%",       f"{out['q75']:.2f}"),
+            ("Max",       f"{out['max']:.2f}"),
+            ("Range",     f"{(mx - mn):.2f}"),
+            ("IQR",       f"{(q3 - q1):.2f}"),
+            ("Skew",      f"{out['skew']:.2f}" if not np.isnan(out['skew']) else "—"),
+            ("Kurtosis",  f"{out['kurtosis']:.2f}" if not np.isnan(out['kurtosis']) else "—"),
+        ], columns=["Metric", "Value"])
+    elif not non_null.empty:
+        counts = non_null.astype("string").value_counts()
+        top_val = counts.index[0]
+        top_freq = int(counts.iloc[0])
+        top_pct = top_freq / len(non_null) * 100
+        class_dist = pd.DataFrame({
+            "Class": counts.index.astype(str),
+            "Count": counts.values,
+            "%":     (counts.values / len(non_null) * 100).round(2),
+        })
+        out.update({
+            "top_value":          str(top_val),
+            "top_freq":           top_freq,
+            "top_pct":            round(top_pct, 2),
+            "class_distribution": class_dist,
+        })
+        out["detail"] = pd.DataFrame([
+            ("Total values",  f"{n:,}"),
+            ("Missing",       f"{miss:,}"),
+            ("Missing %",     f"{miss_pct:.2f}%"),
+            ("Unique classes", f"{unique:,}"),
+            ("Most frequent", str(top_val)),
+            ("Frequency",     f"{top_freq:,}"),
+            ("Frequency %",   f"{top_pct:.2f}%"),
+        ], columns=["Metric", "Value"])
+    else:
+        # All-null target — degenerate but worth representing.
+        out["detail"] = pd.DataFrame([
+            ("Total values", f"{n:,}"),
+            ("Missing",      f"{miss:,}"),
+            ("Missing %",    f"{miss_pct:.2f}%"),
+            ("Unique",       f"{unique:,}"),
+        ], columns=["Metric", "Value"])
+
+    return out
+
+
+# --------------------------------------------------------------------- #
 # Numeric target
 # --------------------------------------------------------------------- #
 
