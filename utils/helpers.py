@@ -39,6 +39,36 @@ def plotly_template() -> str:
     return "plotly_white"
 
 
+def safe_dataframe(df, **kwargs):
+    """PyArrow-safe ``st.dataframe`` wrapper.
+
+    Why this exists: ``st.dataframe`` serialises through PyArrow. If the
+    frame still has a mixed-type object column (e.g. an on-the-fly summary
+    frame built outside the loader's sanitization path), PyArrow raises
+    ``ArrowInvalid`` and the whole Streamlit page errors. This wrapper runs
+    the input through ``make_arrow_safe`` first, so rendering is guaranteed
+    to succeed.
+
+    Use ``safe_dataframe(df, width="stretch")`` anywhere you would have
+    called ``st.dataframe(df, width="stretch")`` — especially for frames
+    built from heterogeneous sources (preview tables, conversion summaries,
+    user-built previews).
+    """
+    import streamlit as st
+    try:
+        from modules.data_sanitization import make_arrow_safe
+        safe = make_arrow_safe(df)
+        return st.dataframe(safe, **kwargs)
+    except Exception as exc:
+        # Absolute last resort — full stringification.
+        try:
+            from modules.data_sanitization import force_stringify
+            return st.dataframe(force_stringify(df), **kwargs)
+        except Exception:
+            st.warning(f"Could not render DataFrame: {exc}")
+            return None
+
+
 def compress_strings_to_category(
     df: pd.DataFrame,
     max_unique_ratio: float = 0.5,

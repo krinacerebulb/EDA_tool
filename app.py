@@ -6,6 +6,7 @@ Run with:
 
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 LOGO_PATH = Path(__file__).parent / "assets" / "cb-logo-tagline-main.png"
@@ -168,6 +169,49 @@ st.success(
 )
 
 
+# ---------- Sanitization summary (industrial dirty-data report) ----------
+# ``data_loader._read_bytes`` runs the production sanitization layer on every
+# upload and attaches the report via ``df.attrs``. We surface a short banner
+# here and a richer breakdown on the Cleaning tab.
+sanitization_report = getattr(raw_df, "attrs", {}).get("sanitization_report", {})
+_san_changes = (
+    int(sanitization_report.get("tokens_replaced_total", 0))
+    + len(sanitization_report.get("numeric_conversions", []))
+    + len(sanitization_report.get("datetime_conversions", []))
+    + len(sanitization_report.get("boolean_conversions", []))
+    + len(sanitization_report.get("arrow_unsafe_columns", []))
+    + int(sanitization_report.get("infinities_replaced", 0))
+)
+if _san_changes > 0:
+    bits = []
+    if sanitization_report.get("tokens_replaced_total"):
+        bits.append(
+            f"replaced **{sanitization_report['tokens_replaced_total']:,}** "
+            "dirty token(s) (e.g. *No Data*, *Bad*, *Sensor Fail*) with NaN"
+        )
+    if sanitization_report.get("numeric_conversions"):
+        bits.append(
+            f"recovered **{len(sanitization_report['numeric_conversions'])}** "
+            "mixed-type column(s) as numeric"
+        )
+    if sanitization_report.get("datetime_conversions"):
+        bits.append(
+            f"parsed **{len(sanitization_report['datetime_conversions'])}** "
+            "column(s) as datetime"
+        )
+    if sanitization_report.get("infinities_replaced"):
+        bits.append(
+            f"removed **{sanitization_report['infinities_replaced']}** "
+            "infinite value(s)"
+        )
+    if sanitization_report.get("arrow_unsafe_columns"):
+        bits.append(
+            f"hardened **{len(sanitization_report['arrow_unsafe_columns'])}** "
+            "column(s) for PyArrow rendering"
+        )
+    st.info("🧼 Auto-sanitization: " + "; ".join(bits) + ".")
+
+
 # ---------- Smart type detection (object → numeric) ----------
 # original_df stays untouched; processed_df is what every downstream tab uses.
 original_df = raw_df
@@ -289,6 +333,96 @@ with tabs[0]:
 
 # ---------- Cleaning ----------
 with tabs[1]:
+    st.subheader("Auto-Sanitization Report")
+    st.caption(
+        "Production sanitization layer — runs once on load. Cleans industrial "
+        "dirty tokens (*No Data*, *Bad*, *Sensor Fail*, Excel errors, ...), "
+        "recovers mixed-type columns, and guarantees PyArrow-safe rendering."
+    )
+    if not sanitization_report:
+        st.caption("No sanitization metadata attached to this dataset.")
+    elif _san_changes == 0:
+        st.success("Dataset was already clean — no industrial tokens or "
+                   "mixed-type columns detected.")
+    else:
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric(
+            "Tokens → NaN",
+            f"{sanitization_report.get('tokens_replaced_total', 0):,}",
+        )
+        sc2.metric(
+            "Numeric recovered",
+            len(sanitization_report.get("numeric_conversions", [])),
+        )
+        sc3.metric(
+            "Datetime recovered",
+            len(sanitization_report.get("datetime_conversions", [])),
+        )
+        sc4.metric(
+            "Arrow-hardened",
+            len(sanitization_report.get("arrow_unsafe_columns", [])),
+        )
+
+        tok_per_col = sanitization_report.get("tokens_replaced_per_column", {})
+        if tok_per_col:
+            with st.expander(
+                f"Dirty tokens replaced — {len(tok_per_col)} column(s)",
+                expanded=False,
+            ):
+                tok_df = pd.DataFrame(
+                    [{"Column": c, "Tokens → NaN": n}
+                     for c, n in sorted(tok_per_col.items(),
+                                        key=lambda kv: -kv[1])]
+                )
+                st.dataframe(tok_df, width="stretch", hide_index=True)
+
+        num_log = sanitization_report.get("numeric_conversions", [])
+        if num_log:
+            with st.expander(
+                f"Mixed-type → numeric — {len(num_log)} column(s)",
+                expanded=False,
+            ):
+                st.dataframe(
+                    pd.DataFrame(num_log),
+                    width="stretch", hide_index=True,
+                )
+
+        dt_log = sanitization_report.get("datetime_conversions", [])
+        if dt_log:
+            with st.expander(
+                f"Detected datetime columns — {len(dt_log)} column(s)",
+                expanded=False,
+            ):
+                st.dataframe(
+                    pd.DataFrame(dt_log),
+                    width="stretch", hide_index=True,
+                )
+
+        arrow_log = sanitization_report.get("arrow_unsafe_columns", [])
+        if arrow_log:
+            with st.expander(
+                f"PyArrow-hardened columns — {len(arrow_log)} column(s)",
+                expanded=False,
+            ):
+                st.caption(
+                    "These columns had mixed Python types that would crash "
+                    "Streamlit's PyArrow renderer. They were stringified so "
+                    "they display safely."
+                )
+                st.dataframe(
+                    pd.DataFrame(arrow_log),
+                    width="stretch", hide_index=True,
+                )
+
+        errors = sanitization_report.get("errors", [])
+        if errors:
+            with st.expander(
+                f"Sanitization warnings — {len(errors)}", expanded=False,
+            ):
+                for msg in errors:
+                    st.markdown(f"- {msg}")
+
+    st.markdown("---")
     st.subheader("Type Conversion Summary")
     if not auto_convert:
         st.caption(

@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from utils.helpers import compress_strings_to_category
+from .data_sanitization import preprocess_dynamic_dataset
 
 
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json", ".parquet", ".pq"}
@@ -48,8 +48,20 @@ def _read_parquet(file_bytes: bytes) -> pd.DataFrame:
 def _read_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Parse raw bytes into a DataFrame. Cached on (bytes_hash, filename).
 
-    Applies category compression at the end so all downstream tabs see the
-    memory-optimised DataFrame.
+    Pipeline:
+      1. Parse with the format-appropriate engine (Polars-first for CSV /
+         Parquet, pandas for Excel / JSON).
+      2. Run ``preprocess_dynamic_dataset`` — this is the production-grade
+         sanitization layer that:
+           * replaces industrial dirty tokens ("No Data", "Bad", "Sensor
+             Fail", "-", Excel errors, ...) with NaN,
+           * promotes majority-numeric / majority-date string columns to
+             their proper dtype,
+           * compresses low-cardinality strings to ``category``,
+           * forces the result to be PyArrow-renderable.
+
+    The sanitization report is attached to ``df.attrs["sanitization_report"]``
+    so the UI can surface a summary banner without re-running the pipeline.
     """
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
@@ -79,7 +91,18 @@ def _read_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     except Exception as exc:
         raise ValueError(f"Could not parse file '{filename}': {exc}") from exc
 
-    return compress_strings_to_category(df)
+    # Sanitize. ``preprocess_dynamic_dataset`` is guaranteed not to raise —
+    # on internal failure it returns the input unchanged plus an error in
+    # the report. We attach the report via ``df.attrs`` so the cached return
+    # value is a plain DataFrame (Streamlit cache hashes the *content*; the
+    # attrs dict rides along through pickle).
+    clean_df, report = preprocess_dynamic_dataset(df)
+    try:
+        clean_df.attrs["sanitization_report"] = report
+    except Exception:
+        # Some pandas builds restrict ``attrs`` assignment; not critical.
+        pass
+    return clean_df
 
 
 def load_dataset(uploaded_file) -> pd.DataFrame:
