@@ -16,9 +16,11 @@ from modules import (
     data_cleaning,
     data_loader,
     eda_analysis,
+    exporter,
     filters,
     insights as insights_mod,
     interactive_viz as iviz,
+    multi_file_loader,
     preprocessing,
     report_generator,
     target_analysis,
@@ -118,55 +120,147 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-st.sidebar.markdown("Upload a dataset to get started.")
+st.sidebar.markdown("Upload one or more datasets to get started.")
 
-uploaded_file = st.sidebar.file_uploader(
-    "Upload CSV, Excel, JSON, or Parquet",
+uploaded_files = st.sidebar.file_uploader(
+    "Upload CSV / Excel / JSON / Parquet (multiple OK)",
     type=["csv", "xlsx", "xls", "json", "parquet", "pq"],
-)
-
-st.sidebar.markdown("---")
-preview_rows = st.sidebar.slider("Preview rows", 5, 50, 10)
-
-st.sidebar.markdown("---")
-auto_convert = st.sidebar.checkbox(
-    "Enable automatic type conversion",
-    value=True,
+    accept_multiple_files=True,
     help=(
-        "Detect object columns that are mostly numeric (≥ 70% of non-null "
-        "values parse as numbers) and convert them so they participate in "
-        "numeric EDA, plots, and correlations. Original data is preserved."
+        "Upload one file for a standard EDA, or several with matching "
+        "schemas (e.g. January.csv, February.csv) to merge them. Files are "
+        "concatenated with an auto-generated `source_file` column when "
+        "two or more files are uploaded. Schema mismatches are aligned to "
+        "the column-union and missing cells are filled with NaN — the "
+        "platform never crashes on partial mismatches."
     ),
 )
+
+# Preview-row count is a fixed product decision (10 rows is the SaaS
+# convention — enough to spot patterns, short enough to fit on one
+# screen). Automatic type conversion is always on so dirty industrial
+# columns ("123", "No Data", "456") are recovered as numeric without
+# the user needing to opt in.
+preview_rows = 10
+auto_convert = True
 
 
 # ---------- Main ----------
 st.title("Auto EDA Platform")
 st.caption("Automated exploratory data analysis, visualizations, and insights — a Cerebulb product.")
 
-if uploaded_file is None:
-    st.info("Upload a dataset from the sidebar to begin.")
+if not uploaded_files:
+    st.info("Upload one or more datasets from the sidebar to begin.")
     st.stop()
 
-# Load with spinner + error handling.
-with st.spinner("Loading dataset..."):
+# Route through the multi-file loader. It handles a single file just as
+# well as N files — the merge step is a no-op when only one frame
+# survives. The loader is "never raises" by contract, but we still wrap
+# the call so any unexpected exception surfaces as a clean error rather
+# than a stack trace.
+with st.spinner(
+    f"Loading {len(uploaded_files)} file(s) and running sanitization…"
+):
     try:
-        raw_df = data_loader.load_dataset(uploaded_file)
-    except ValueError as exc:
-        st.error(str(exc))
-        st.stop()
-    except Exception as exc:  # last-resort guard
-        st.error(f"Unexpected error while loading the file: {exc}")
+        raw_df, multi_report = multi_file_loader.load_multiple_files(
+            uploaded_files,
+        )
+    except Exception as exc:
+        st.error(f"Unexpected error while loading the files: {exc}")
         st.stop()
 
-if raw_df.empty:
-    st.warning("The uploaded file loaded successfully but contains no rows.")
+# Per-file load status — show which files succeeded and which failed.
+_files_status = multi_report.get("per_file", {})
+_ok_files = [n for n, m in _files_status.items() if m["status"] == "ok"]
+_bad_files = [n for n, m in _files_status.items() if m["status"] == "failed"]
+
+if _bad_files:
+    with st.sidebar.expander(
+        f"⚠ {len(_bad_files)} file(s) failed", expanded=False,
+    ):
+        for n in _bad_files:
+            st.markdown(f"**{n}** — {_files_status[n]['error']}")
+
+if raw_df is None or raw_df.empty:
+    if _bad_files and not _ok_files:
+        st.error(
+            "Every uploaded file failed to load. See the per-file errors "
+            "in the sidebar for details."
+        )
+    else:
+        st.warning(
+            "Uploaded file(s) loaded successfully but contain no rows."
+        )
     st.stop()
+
+# Display name for the upload batch — used in titles, export filenames,
+# and the HTML report header.
+if len(_ok_files) == 1:
+    dataset_label = _ok_files[0]
+else:
+    dataset_label = f"{len(_ok_files)} merged files"
+# Filesystem-safe stem for default export filenames.
+dataset_stem = (
+    Path(_ok_files[0]).stem if len(_ok_files) == 1 else "merged_dataset"
+)
 
 st.success(
-    f"Loaded **{uploaded_file.name}** — "
+    f"Loaded **{dataset_label}** — "
     f"{raw_df.shape[0]:,} rows × {raw_df.shape[1]} columns."
 )
+
+# Multi-file merge summary — only shown when there's actually multi-file
+# context to report. Single-file uploads with a clean schema produce no
+# warnings, so this panel stays out of the way.
+if len(_ok_files) > 1 or multi_report.get("schema_warnings"):
+    with st.expander(
+        f"📂 Multi-file merge summary — {len(_ok_files)} file(s) merged",
+        expanded=bool(multi_report.get("schema_warnings")),
+    ):
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Files merged", len(_ok_files))
+        mc2.metric("Files failed", len(_bad_files))
+        mc3.metric("Merged rows", f"{multi_report.get('merged_rows', 0):,}")
+        mc4.metric("Merged columns", multi_report.get("merged_cols", 0))
+
+        if _files_status:
+            per_file_rows = pd.DataFrame([
+                {
+                    "File": n,
+                    "Status": m["status"],
+                    "Rows": m["rows"],
+                    "Columns": m["cols"],
+                    "Note": m["error"] or "",
+                }
+                for n, m in _files_status.items()
+            ])
+            st.dataframe(per_file_rows, width="stretch", hide_index=True)
+
+        for msg in multi_report.get("schema_warnings", []):
+            st.warning(msg)
+
+        alignment = multi_report.get("schema_alignment", {})
+        gaps = {
+            n: a for n, a in alignment.items()
+            if a.get("missing_in_this_file") or a.get("unique_to_this_file")
+        }
+        if gaps:
+            with st.expander("Per-file column analysis", expanded=False):
+                st.dataframe(
+                    pd.DataFrame([
+                        {
+                            "File": n,
+                            "Missing in this file": ", ".join(
+                                a.get("missing_in_this_file", [])
+                            ) or "—",
+                            "Unique to this file": ", ".join(
+                                a.get("unique_to_this_file", [])
+                            ) or "—",
+                        }
+                        for n, a in gaps.items()
+                    ]),
+                    width="stretch", hide_index=True,
+                )
 
 
 # ---------- Sanitization summary (industrial dirty-data report) ----------
@@ -243,27 +337,16 @@ if type_detection.had_invalid_coercions(conversion_report):
 preprocessed_df = preprocessing.render_preprocessing_ui(processed_df)
 
 
-# ---------- Sidebar: dynamic filters (applied to everything below) ----------
-st.sidebar.markdown("---")
-df, flt_summary = filters.render_sidebar_filters(preprocessed_df)
-
-# Filter status metrics.
-if flt_summary["is_filtered"]:
-    st.markdown("### 🎯 Filter impact")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Rows remaining", f"{flt_summary['filtered_rows']:,}")
-    m2.metric("Original rows", f"{flt_summary['original_rows']:,}")
-    m3.metric("Rows removed", f"{flt_summary['dropped_rows']:,}")
-    m4.metric("% remaining", f"{flt_summary['percent_remaining']}%")
-
-    if flt_summary["applied"]:
-        with st.expander(f"Active filters ({len(flt_summary['applied'])})", expanded=False):
-            for rule in flt_summary["applied"]:
-                st.markdown(f"- {rule}")
+# ---------- Sidebar filters ----------
+# Filters render in the sidebar (Tableau / Datadog / Looker convention).
+# The panel itself shows its own inline impact summary + reset button,
+# so the main column stays focused on tables and visualizations.
+df, flt_summary = filters.render_filters(preprocessed_df)
 
 if df.empty:
     st.warning(
-        "Current filters exclude every row. Relax them from the sidebar to continue."
+        "Current filters exclude every row. Relax them from the sidebar "
+        "to continue."
     )
     st.stop()
 
@@ -297,38 +380,70 @@ tabs = st.tabs([
 
 # ---------- Overview ----------
 with tabs[0]:
-    st.subheader("Dataset Preview")
-    st.dataframe(df.head(preview_rows), width="stretch")
-
+    # KPI strip lives ABOVE the preview so the headline shape of the
+    # dataset is the first thing the user sees — a SaaS-dashboard
+    # convention. Preview, column types, and exports follow below.
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rows", f"{overview['rows']:,}")
     c2.metric("Columns", overview["columns"])
     c3.metric("Memory", human_bytes(overview["memory_bytes"]))
     c4.metric("Missing values", f"{overview['total_missing']:,}")
 
+    st.subheader("Dataset Preview")
+    st.dataframe(df.head(preview_rows), width="stretch")
+
     st.subheader("Column Types")
     st.dataframe(dtype_info, width="stretch")
 
-    st.subheader("Download dataset")
-    dl1, dl2 = st.columns(2)
-    with dl1:
-        filters.download_button(df, label="Download filtered CSV (rows in range)")
-    with dl2:
-        if flt_summary["is_filtered"]:
-            excluded_df = preprocessed_df.loc[
-                preprocessed_df.index.difference(df.index)
-            ]
-            if not excluded_df.empty:
-                st.download_button(
-                    label="Download excluded CSV (rows outside range)",
-                    data=excluded_df.to_csv(index=False).encode("utf-8"),
-                    file_name="excluded_dataset.csv",
-                    mime="text/csv",
-                )
-            else:
+    # --- Export panel — multi-format download (CSV / Excel / JSON / Parquet) ---
+    # Driven by ``exporter.render_export_ui``. When filters are active we
+    # offer two tabs: rows kept by the filters, and rows excluded. When no
+    # filters are active we offer one panel covering the full dataset.
+    st.subheader("Export dataset")
+    if flt_summary["is_filtered"]:
+        excluded_df = preprocessed_df.loc[
+            preprocessed_df.index.difference(df.index)
+        ]
+        export_tabs = st.tabs([
+            f"Filtered rows ({len(df):,})",
+            f"Excluded rows ({len(excluded_df):,})",
+        ])
+        with export_tabs[0]:
+            st.caption(
+                "Sanitized, preprocessed, and filtered dataset — the exact "
+                "data feeding every tab on this page."
+            )
+            exporter.render_export_ui(
+                df,
+                base_filename=f"{dataset_stem}_filtered",
+                key_prefix="exp_filtered",
+                label="Download filtered data",
+            )
+        with export_tabs[1]:
+            if excluded_df.empty:
                 st.caption("No excluded rows for the current filters.")
-        else:
-            st.caption("No filters applied — nothing to export as excluded.")
+            else:
+                st.caption(
+                    "Rows that the current sidebar filters removed — useful "
+                    "for diff / QC workflows."
+                )
+                exporter.render_export_ui(
+                    excluded_df,
+                    base_filename=f"{dataset_stem}_excluded",
+                    key_prefix="exp_excluded",
+                    label="Download excluded data",
+                )
+    else:
+        st.caption(
+            "No sidebar filters are active. The export below contains the "
+            "full sanitized + preprocessed dataset."
+        )
+        exporter.render_export_ui(
+            df,
+            base_filename=dataset_stem,
+            key_prefix="exp_full",
+            label="Download dataset",
+        )
 
 
 # ---------- Cleaning ----------
@@ -958,7 +1073,7 @@ with tabs[7]:
         with st.spinner("Building report..."):
             html = report_generator.build_html_report(
                 df=df,
-                filename=uploaded_file.name,
+                filename=dataset_label,
                 overview=overview,
                 dtype_info=dtype_info,
                 missing=missing,
@@ -972,6 +1087,8 @@ with tabs[7]:
         st.download_button(
             "Download HTML report",
             data=html.encode("utf-8"),
-            file_name=f"eda_report_{uploaded_file.name}.html",
+            file_name=exporter.make_export_filename(
+                f"eda_report_{dataset_stem}", "html",
+            ),
             mime="text/html",
         )

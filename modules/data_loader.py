@@ -44,7 +44,12 @@ def _read_parquet(file_bytes: bytes) -> pd.DataFrame:
         return pd.read_parquet(BytesIO(file_bytes))
 
 
-@st.cache_data(show_spinner="Loading dataset…")
+# ``show_spinner=False`` because callers display their own, more
+# informative spinner (``multi_file_loader.load_multiple_files`` / the
+# outer block in ``app.py``). Leaving the default cache-spinner on would
+# stack a second "Loading dataset…" overlay on top of the caller's
+# spinner — visible to the user as the UI flashing twice on upload.
+@st.cache_data(show_spinner=False)
 def _read_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Parse raw bytes into a DataFrame. Cached on (bytes_hash, filename).
 
