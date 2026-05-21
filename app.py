@@ -639,6 +639,11 @@ with tabs[2]:
 
 
 # ---------- Visualizations (interactive Plotly) ----------
+# Refactor note: every chart config is wrapped in an ``st.form``. Widget
+# changes inside a form don't trigger a rerun — only the **Build chart**
+# submit does. The chart bytes are stored in ``st.session_state`` so the
+# rendered chart persists across reruns (tab switches, filter changes
+# that don't affect the chart) until the user explicitly rebuilds.
 with tabs[3]:
     if not numeric_cols and not categorical_cols:
         st.info("Nothing to visualize.")
@@ -655,68 +660,146 @@ with tabs[3]:
             ],
         )
 
+        # Each chart type gets its own sub-form so widget changes within a
+        # chart don't fire until "Build chart" is clicked. The last-built
+        # config per chart type is cached in session_state under a stable
+        # key so a tab-switch doesn't lose the chart.
+
         if viz_type == "Histogram":
             if not numeric_cols:
                 st.info("No numeric columns available.")
             else:
-                col = st.selectbox("Column", numeric_cols, key="hist_col")
-                bins = st.slider("Bins", 5, 100, 30)
-                with st.spinner("Building histogram…"):
-                    st.pyplot(
-                        iviz.histogram(df, col, bins=bins),
-                        clear_figure=True,
+                with st.form("viz_hist_form", clear_on_submit=False, border=False):
+                    st.selectbox("Column", numeric_cols, key="hist_col")
+                    st.slider("Bins", 5, 100, 30, key="hist_bins")
+                    built = st.form_submit_button(
+                        "📊 Build histogram",                        use_container_width=True,
                     )
+                if built:
+                    st.session_state["_viz_hist_cfg"] = (
+                        st.session_state["hist_col"],
+                        int(st.session_state["hist_bins"]),
+                    )
+                cfg = st.session_state.get("_viz_hist_cfg")
+                if cfg:
+                    col, bins = cfg
+                    if col in numeric_cols:
+                        with st.spinner("Building histogram…"):
+                            st.pyplot(
+                                iviz.histogram(df, col, bins=bins),
+                                clear_figure=True,
+                            )
+                    else:
+                        st.info("Selected column no longer exists — pick another and rebuild.")
+                else:
+                    st.info("Configure the chart above and click **Build histogram**.")
 
         elif viz_type == "Boxplot":
             if not numeric_cols:
                 st.info("No numeric columns available.")
             else:
-                col = st.selectbox("Column", numeric_cols, key="box_col")
-                with st.spinner("Building boxplot…"):
-                    st.pyplot(iviz.boxplot(df, col), clear_figure=True)
+                with st.form("viz_box_form", clear_on_submit=False, border=False):
+                    st.selectbox("Column", numeric_cols, key="box_col")
+                    built = st.form_submit_button(
+                        "📊 Build boxplot",                        use_container_width=True,
+                    )
+                if built:
+                    st.session_state["_viz_box_cfg"] = st.session_state["box_col"]
+                cfg = st.session_state.get("_viz_box_cfg")
+                if cfg and cfg in numeric_cols:
+                    with st.spinner("Building boxplot…"):
+                        st.pyplot(iviz.boxplot(df, cfg), clear_figure=True)
+                elif cfg:
+                    st.info("Selected column no longer exists — pick another and rebuild.")
+                else:
+                    st.info("Configure the chart above and click **Build boxplot**.")
 
         elif viz_type == "Scatter plot":
             if len(numeric_cols) < 2:
                 st.info("Need at least two numeric columns for a scatter plot.")
             else:
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    x_col = st.selectbox("X axis", numeric_cols, key="scatter_x")
-                with c2:
-                    y_col = st.selectbox(
-                        "Y axis",
-                        [c for c in numeric_cols if c != x_col],
-                        key="scatter_y",
+                # Pre-form: read current X to filter Y options. Picking X
+                # is cheap (it doesn't touch the dataframe), so a rerun
+                # here is acceptable to keep Y/X mutually exclusive.
+                with st.form("viz_scatter_form", clear_on_submit=False, border=False):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.selectbox("X axis", numeric_cols, key="scatter_x")
+                    with c2:
+                        y_options = [
+                            c for c in numeric_cols
+                            if c != st.session_state.get("scatter_x", numeric_cols[0])
+                        ]
+                        st.selectbox("Y axis", y_options, key="scatter_y")
+                    with c3:
+                        color_options = ["(none)"] + categorical_cols + numeric_cols
+                        st.selectbox("Colour by", color_options, key="scatter_color")
+                    built = st.form_submit_button(
+                        "📊 Build scatter plot",                        use_container_width=True,
                     )
-                with c3:
-                    color_options = ["(none)"] + categorical_cols + numeric_cols
-                    color = st.selectbox("Colour by", color_options, key="scatter_color")
-                color_col = None if color == "(none)" else color
-                with st.spinner("Building scatter plot…"):
-                    st.pyplot(
-                        iviz.scatter(df, x_col, y_col, color=color_col),
-                        clear_figure=True,
+                if built:
+                    color_v = st.session_state["scatter_color"]
+                    st.session_state["_viz_scatter_cfg"] = (
+                        st.session_state["scatter_x"],
+                        st.session_state["scatter_y"],
+                        None if color_v == "(none)" else color_v,
                     )
+                cfg = st.session_state.get("_viz_scatter_cfg")
+                if cfg:
+                    x_col, y_col, color_col = cfg
+                    if x_col in numeric_cols and y_col in numeric_cols:
+                        with st.spinner("Building scatter plot…"):
+                            st.pyplot(
+                                iviz.scatter(df, x_col, y_col, color=color_col),
+                                clear_figure=True,
+                            )
+                    else:
+                        st.info("Selected columns no longer exist — pick again and rebuild.")
+                else:
+                    st.info("Configure the chart above and click **Build scatter plot**.")
 
         elif viz_type == "Bar chart (categorical)":
             if not categorical_cols:
                 st.info("No categorical columns available.")
             else:
-                col = st.selectbox("Column", categorical_cols, key="bar_col")
-                top_n = st.slider("Top N values", 3, 30, 10)
-                with st.spinner("Building bar chart…"):
-                    st.pyplot(
-                        iviz.bar_chart(df, col, top_n=top_n),
-                        clear_figure=True,
+                with st.form("viz_bar_form", clear_on_submit=False, border=False):
+                    st.selectbox("Column", categorical_cols, key="bar_col")
+                    st.slider("Top N values", 3, 30, 10, key="bar_top_n")
+                    built = st.form_submit_button(
+                        "📊 Build bar chart",                        use_container_width=True,
                     )
+                if built:
+                    st.session_state["_viz_bar_cfg"] = (
+                        st.session_state["bar_col"],
+                        int(st.session_state["bar_top_n"]),
+                    )
+                cfg = st.session_state.get("_viz_bar_cfg")
+                if cfg:
+                    col, top_n = cfg
+                    if col in categorical_cols:
+                        with st.spinner("Building bar chart…"):
+                            st.pyplot(
+                                iviz.bar_chart(df, col, top_n=top_n),
+                                clear_figure=True,
+                            )
+                    else:
+                        st.info("Selected column no longer exists — pick another and rebuild.")
+                else:
+                    st.info("Configure the chart above and click **Build bar chart**.")
 
         elif viz_type == "Correlation heatmap":
-            with st.spinner("Computing correlations…"):
-                fig = iviz.correlation_heatmap(df)
-            if fig is None:
-                st.info("Need at least 2 numeric columns for a correlation heatmap.")
+            # No options — single button trigger.
+            if st.button("📊 Build correlation heatmap",                         key="viz_corr_build", use_container_width=True):
+                st.session_state["_viz_corr_built"] = True
+            if st.session_state.get("_viz_corr_built"):
+                with st.spinner("Computing correlations…"):
+                    fig = iviz.correlation_heatmap(df)
+                if fig is None:
+                    st.info("Need at least 2 numeric columns for a correlation heatmap.")
+                else:
+                    st.plotly_chart(fig, width="stretch")
             else:
-                st.plotly_chart(fig, width="stretch")
+                st.info("Click **Build correlation heatmap** to compute and render.")
 
         elif viz_type == "Multi-line time series":
             datetime_cols_viz = ts_mod.detect_datetime_columns(df)
@@ -728,60 +811,81 @@ with tabs[3]:
             elif not numeric_cols:
                 st.info("No numeric columns available to plot.")
             else:
-                c1, c2 = st.columns([1, 2])
-                with c1:
-                    ml_date = st.selectbox(
-                        "Date column", datetime_cols_viz, key="ml_date",
-                    )
-                with c2:
-                    ml_values = st.multiselect(
-                        "Numerical columns to compare",
-                        numeric_cols,
-                        default=numeric_cols[: min(2, len(numeric_cols))],
-                        key="ml_values",
+                with st.form("viz_ml_form", clear_on_submit=False, border=False):
+                    c1, c2 = st.columns([1, 2])
+                    with c1:
+                        st.selectbox(
+                            "Date column", datetime_cols_viz, key="ml_date",
+                        )
+                    with c2:
+                        st.multiselect(
+                            "Numerical columns to compare",
+                            numeric_cols,
+                            default=numeric_cols[: min(2, len(numeric_cols))],
+                            key="ml_values",
+                            help=(
+                                "Pick two or more numeric columns. If their "
+                                "scales differ by more than 10×, a secondary "
+                                "y-axis is added automatically."
+                            ),
+                        )
+                    st.selectbox(
+                        "Aggregation",
+                        ["None", "Daily", "Monthly"],
+                        index=0,
+                        key="ml_agg",
                         help=(
-                            "Pick two or more numeric columns. If their scales "
-                            "differ by more than 10×, a secondary y-axis is "
-                            "added automatically."
+                            "Aggregate (mean) into Daily or Monthly buckets "
+                            "before plotting. Choose ``None`` to plot every "
+                            "raw row."
                         ),
                     )
-
-                ml_agg = st.selectbox(
-                    "Aggregation",
-                    ["None", "Daily", "Monthly"],
-                    index=0,
-                    key="ml_agg",
-                    help=(
-                        "Aggregate (mean) into Daily or Monthly buckets before "
-                        "plotting. This is data-preserving aggregation, not "
-                        "random sampling. Choose ``None`` to plot every raw row."
-                    ),
-                )
-
-                if not ml_values:
-                    st.info("Select at least one numeric column.")
-                else:
-                    fig = iviz.multi_line_time_series(
-                        df,
-                        date_col=ml_date,
-                        value_cols=ml_values,
-                        aggregation=ml_agg,
+                    built = st.form_submit_button(
+                        "📊 Build time-series chart",                        use_container_width=True,
                     )
-                    if fig is None:
-                        st.warning(
-                            "No rows left after parsing the date column. "
-                            "Check that it contains valid dates."
-                        )
+                if built:
+                    st.session_state["_viz_ml_cfg"] = (
+                        st.session_state["ml_date"],
+                        tuple(st.session_state["ml_values"]),
+                        st.session_state["ml_agg"],
+                    )
+                cfg = st.session_state.get("_viz_ml_cfg")
+                if cfg:
+                    ml_date, ml_values, ml_agg = cfg
+                    ml_values = list(ml_values)
+                    if not ml_values:
+                        st.info("Select at least one numeric column and rebuild.")
                     else:
-                        st.plotly_chart(fig, width="stretch")
+                        fig = iviz.multi_line_time_series(
+                            df,
+                            date_col=ml_date,
+                            value_cols=ml_values,
+                            aggregation=ml_agg,
+                        )
+                        if fig is None:
+                            st.warning(
+                                "No rows left after parsing the date column. "
+                                "Check that it contains valid dates."
+                            )
+                        else:
+                            st.plotly_chart(fig, width="stretch")
+                else:
+                    st.info("Configure the chart above and click **Build time-series chart**.")
 
 
 # ---------- Time Series ----------
+# Refactor note: ``prepare_series``, ``time_series_plot`` and
+# ``trend_insights`` are NOT cached and rebuild the Plotly figure on
+# every rerun. Wrap the config widgets in a form so the user picks
+# everything first and only the submit triggers the expensive prepare
+# + plot + insights pass. The last-built config is stashed in
+# session_state so the chart survives tab-switches and sidebar reruns.
 with tabs[4]:
     st.subheader("Time Series Trend Analysis")
     st.caption(
         "Automatically detects datetime columns, then builds an interactive "
-        "Plotly chart with optional rolling-mean smoothing."
+        "Plotly chart with optional rolling-mean smoothing. "
+        "Configure the chart below and click **Plot time series**."
     )
 
     datetime_cols = ts_mod.detect_datetime_columns(df)
@@ -795,69 +899,119 @@ with tabs[4]:
     elif not ts_value_candidates:
         st.info("No numeric columns available to use as the time-series value.")
     else:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            date_col = st.selectbox("Date column", datetime_cols, key="ts_date")
-        with c2:
-            value_col = st.selectbox(
-                "Value column (numeric)",
-                ts_value_candidates,
-                key="ts_value",
-            )
-        with c3:
-            apply_smoothing = st.checkbox("Rolling average", value=False, key="ts_smooth")
-
-        rolling_window = None
-        if apply_smoothing:
-            rolling_window = st.slider(
-                "Rolling window (periods)",
+        with st.form("ts_form", clear_on_submit=False, border=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.selectbox("Date column", datetime_cols, key="ts_date")
+            with c2:
+                st.selectbox(
+                    "Value column (numeric)",
+                    ts_value_candidates,
+                    key="ts_value",
+                )
+            with c3:
+                st.checkbox(
+                    "Rolling average", value=False, key="ts_smooth",
+                )
+            # Rolling-window slider sits inside the form even though it's
+            # only meaningful when smoothing is on — keeps everything
+            # batched under one submit.
+            st.slider(
+                "Rolling window (data points — number of rows per average)",
                 min_value=2,
                 max_value=60,
                 value=7,
                 key="ts_window",
             )
-
-        prepared = ts_mod.prepare_series(df, date_col, value_col)
-
-        if prepared.empty:
-            st.warning(
-                "No rows left after parsing and cleaning — check that "
-                f"`{date_col}` contains dates and `{value_col}` contains numbers."
+            built = st.form_submit_button(
+                "📊 Plot time series",                use_container_width=True,
             )
+
+        if built:
+            st.session_state["_ts_cfg"] = (
+                st.session_state["ts_date"],
+                st.session_state["ts_value"],
+                bool(st.session_state["ts_smooth"]),
+                int(st.session_state["ts_window"]),
+            )
+
+        cfg = st.session_state.get("_ts_cfg")
+        if cfg:
+            date_col, value_col, apply_smoothing, window = cfg
+            rolling_window = window if apply_smoothing else None
+
+            if date_col not in df.columns or value_col not in df.columns:
+                st.info(
+                    "Selected columns no longer exist — reconfigure and "
+                    "click **Plot time series** again."
+                )
+            else:
+                prepared = ts_mod.prepare_series(df, date_col, value_col)
+                if prepared.empty:
+                    st.warning(
+                        "No rows left after parsing and cleaning — check that "
+                        f"`{date_col}` contains dates and `{value_col}` "
+                        "contains numbers."
+                    )
+                else:
+                    st.caption(
+                        f"Using {len(prepared):,} rows from "
+                        f"{prepared[date_col].min():%Y-%m-%d} to "
+                        f"{prepared[date_col].max():%Y-%m-%d}."
+                    )
+                    st.plotly_chart(
+                        ts_mod.time_series_plot(
+                            prepared, date_col, value_col,
+                            rolling_window=rolling_window,
+                        ),
+                        width="stretch",
+                    )
+
+                    st.markdown("### 🔎 Trend insights")
+                    for line in ts_mod.trend_insights(prepared, date_col, value_col):
+                        st.markdown(f"- {line}")
         else:
-            st.caption(
-                f"Using {len(prepared):,} rows from "
-                f"{prepared[date_col].min():%Y-%m-%d} to "
-                f"{prepared[date_col].max():%Y-%m-%d}."
-            )
-            st.plotly_chart(
-                ts_mod.time_series_plot(
-                    prepared, date_col, value_col, rolling_window=rolling_window,
-                ),
-                width="stretch",
-            )
-
-            st.markdown("### 🔎 Trend insights")
-            for line in ts_mod.trend_insights(prepared, date_col, value_col):
-                st.markdown(f"- {line}")
+            st.info("Configure the chart above and click **Plot time series**.")
 
 
 # ---------- Target-based EDA ----------
+# Refactor note: the target selector + Run button are wrapped in a form
+# so picking a target alone doesn't fire all the cached lookups +
+# Plotly figure builds. Only **Run target analysis** commits the choice.
+# The last-committed target is stashed in session_state so the analysis
+# survives reruns. Sub-plots (target distribution, target-over-time,
+# target-by-category) each have their own small forms below.
 with tabs[5]:
     st.subheader("Target-Based EDA")
     st.caption(
         "Pick a target column to see how every other feature relates to it. "
-        "Numeric targets use correlation; categorical targets use grouped comparisons."
+        "Numeric targets use correlation; categorical targets use grouped "
+        "comparisons."
     )
 
-    target = st.selectbox(
-        "Target column",
-        ["(none)"] + list(df.columns),
-        key="target_col",
-    )
+    with st.form("target_pick_form", clear_on_submit=False, border=False):
+        st.selectbox(
+            "Target column",
+            ["(none)"] + list(df.columns),
+            key="target_col",
+        )
+        run_target = st.form_submit_button(
+            "🎯 Run target analysis",            use_container_width=True,
+        )
+    if run_target:
+        st.session_state["_target_committed"] = st.session_state["target_col"]
+
+    target = st.session_state.get("_target_committed", "(none)")
+    # Don't carry over a target that no longer exists (e.g. the user dropped
+    # the column via the preprocessing UI).
+    if target not in df.columns:
+        target = "(none)"
 
     if target == "(none)":
-        st.info("Select a target column above to generate analysis.")
+        st.info(
+            "Pick a target column above and click **Run target analysis** "
+            "to generate the per-target views."
+        )
     else:
         numeric_target = target_analysis.is_numeric_target(df, target)
         st.markdown(
@@ -919,44 +1073,68 @@ with tabs[5]:
                     "with the target."
                 )
 
-            # --- Distribution of the target ---
+            # --- Distribution of the target (form-gated histogram) ---
             st.markdown("### Distribution of target")
-            hist_bins = st.slider(
-                "Bins", 5, 100, 30, key="target_hist_bins",
-            )
-            st.pyplot(
-                iviz.histogram(df, target, bins=hist_bins),
-                clear_figure=True,
-            )
+            with st.form("target_hist_form", clear_on_submit=False, border=False):
+                st.slider("Bins", 5, 100, 30, key="target_hist_bins")
+                hist_built = st.form_submit_button(
+                    "📊 Plot distribution",                    use_container_width=True,
+                )
+            if hist_built:
+                st.session_state["_target_hist_cfg"] = (
+                    target, int(st.session_state["target_hist_bins"]),
+                )
+            hist_cfg = st.session_state.get("_target_hist_cfg")
+            if hist_cfg and hist_cfg[0] == target:
+                st.pyplot(
+                    iviz.histogram(df, target, bins=hist_cfg[1]),
+                    clear_figure=True,
+                )
+            else:
+                st.caption("Click **Plot distribution** to render the histogram.")
 
-            # --- Target over time ---
+            # --- Target over time (form-gated multi-line chart) ---
             target_datetime_cols = ts_mod.detect_datetime_columns(df)
             if target_datetime_cols:
                 st.markdown("### Target over time")
-                tgt_date_col = st.selectbox(
-                    "Date column",
-                    target_datetime_cols,
-                    key="target_line_date",
-                )
-                tgt_agg = st.selectbox(
-                    "Aggregation",
-                    ["None", "Daily", "Monthly"],
-                    index=1 if len(df) > 500 else 0,
-                    key="target_line_agg",
-                )
-                line_fig = iviz.multi_line_time_series(
-                    df,
-                    date_col=tgt_date_col,
-                    value_cols=[target],
-                    aggregation=tgt_agg,
-                )
-                if line_fig is None:
-                    st.info(
-                        f"Could not parse `{tgt_date_col}` as dates — "
-                        "no rows left to plot."
+                with st.form("target_line_form", clear_on_submit=False, border=False):
+                    st.selectbox(
+                        "Date column",
+                        target_datetime_cols,
+                        key="target_line_date",
                     )
+                    st.selectbox(
+                        "Aggregation",
+                        ["None", "Daily", "Monthly"],
+                        index=1 if len(df) > 500 else 0,
+                        key="target_line_agg",
+                    )
+                    line_built = st.form_submit_button(
+                        "📊 Plot target over time",                        use_container_width=True,
+                    )
+                if line_built:
+                    st.session_state["_target_line_cfg"] = (
+                        target,
+                        st.session_state["target_line_date"],
+                        st.session_state["target_line_agg"],
+                    )
+                line_cfg = st.session_state.get("_target_line_cfg")
+                if line_cfg and line_cfg[0] == target:
+                    _, ld, la = line_cfg
+                    line_fig = iviz.multi_line_time_series(
+                        df, date_col=ld, value_cols=[target], aggregation=la,
+                    )
+                    if line_fig is None:
+                        st.info(
+                            f"Could not parse `{ld}` as dates — no rows "
+                            "left to plot."
+                        )
+                    else:
+                        st.plotly_chart(line_fig, width="stretch")
                 else:
-                    st.plotly_chart(line_fig, width="stretch")
+                    st.caption(
+                        "Click **Plot target over time** to render the chart."
+                    )
             else:
                 st.caption(
                     "No datetime column detected — skipping target-over-time plot."
@@ -966,32 +1144,59 @@ with tabs[5]:
             cat_options = [c for c in categorical_cols if c != target]
             if cat_options:
                 st.markdown("### Target by categorical feature")
-                tgt_cat = st.selectbox(
-                    "Categorical feature",
-                    cat_options,
-                    key="target_box_cat",
-                )
-                st.pyplot(
-                    iviz.grouped_box(df, category=tgt_cat, numeric=target),
-                    clear_figure=True,
-                )
+                with st.form("target_grpbox_form", clear_on_submit=False, border=False):
+                    st.selectbox(
+                        "Categorical feature",
+                        cat_options,
+                        key="target_box_cat",
+                    )
+                    box_built = st.form_submit_button(
+                        "📊 Plot grouped box",                        use_container_width=True,
+                    )
+                if box_built:
+                    st.session_state["_target_box_cfg"] = (
+                        target, st.session_state["target_box_cat"],
+                    )
+                box_cfg = st.session_state.get("_target_box_cfg")
+                if box_cfg and box_cfg[0] == target:
+                    _, tc = box_cfg
+                    if tc in cat_options:
+                        st.pyplot(
+                            iviz.grouped_box(df, category=tc, numeric=target),
+                            clear_figure=True,
+                        )
+                else:
+                    st.caption("Click **Plot grouped box** to render the chart.")
             else:
                 st.caption(
                     "No categorical features available for grouped box plot."
                 )
 
         else:
-            # --- Counts per category ---
+            # --- Counts per category (form-gated bar chart) ---
             st.markdown(f"### Count per **{target}** category")
-            top_n = st.slider(
-                "Top N categories", 3, 30, 10, key="target_bar_topn",
-            )
-            st.pyplot(
-                iviz.bar_chart(df, target, top_n=top_n),
-                clear_figure=True,
-            )
+            with st.form("target_bar_form", clear_on_submit=False, border=False):
+                st.slider(
+                    "Top N categories", 3, 30, 10, key="target_bar_topn",
+                )
+                bar_built = st.form_submit_button(
+                    "📊 Plot category counts",                    use_container_width=True,
+                )
+            if bar_built:
+                st.session_state["_target_bar_cfg"] = (
+                    target, int(st.session_state["target_bar_topn"]),
+                )
+            bar_cfg = st.session_state.get("_target_bar_cfg")
+            if bar_cfg and bar_cfg[0] == target:
+                _, tn = bar_cfg
+                st.pyplot(
+                    iviz.bar_chart(df, target, top_n=tn),
+                    clear_figure=True,
+                )
+            else:
+                st.caption("Click **Plot category counts** to render the chart.")
 
-            # --- Group means + importance ---
+            # --- Group means + importance (cached lookups, render directly) ---
             means_df = target_analysis.group_means(df, target)
             if means_df.empty:
                 st.info("No numeric features to compare across the target groups.")
@@ -1010,19 +1215,36 @@ with tabs[5]:
                         f"across the groups of **{target}**."
                     )
 
-                    # --- Boxplot: numeric feature vs target groups ---
+                    # --- Boxplots: numeric features vs target groups (form-gated) ---
                     st.markdown("### Numeric features by target group")
                     num_options = imp_df["Feature"].tolist()
-                    chosen_features = st.multiselect(
-                        "Numeric features",
-                        num_options,
-                        default=num_options[: min(2, len(num_options))],
-                        key="target_box_features",
-                    )
-                    for feat in chosen_features:
-                        st.pyplot(
-                            iviz.grouped_box(df, category=target, numeric=feat),
-                            clear_figure=True,
+                    with st.form("target_numbox_form", clear_on_submit=False, border=False):
+                        st.multiselect(
+                            "Numeric features",
+                            num_options,
+                            default=num_options[: min(2, len(num_options))],
+                            key="target_box_features",
+                        )
+                        nbox_built = st.form_submit_button(
+                            "📊 Plot grouped boxes",                            use_container_width=True,
+                        )
+                    if nbox_built:
+                        st.session_state["_target_numbox_cfg"] = (
+                            target,
+                            tuple(st.session_state["target_box_features"]),
+                        )
+                    nbox_cfg = st.session_state.get("_target_numbox_cfg")
+                    if nbox_cfg and nbox_cfg[0] == target:
+                        _, features = nbox_cfg
+                        for feat in features:
+                            if feat in num_options:
+                                st.pyplot(
+                                    iviz.grouped_box(df, category=target, numeric=feat),
+                                    clear_figure=True,
+                                )
+                    else:
+                        st.caption(
+                            "Click **Plot grouped boxes** to render the charts."
                         )
 
         st.markdown("### Textual insights")

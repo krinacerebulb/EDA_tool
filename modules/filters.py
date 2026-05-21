@@ -1,12 +1,27 @@
-"""Sidebar-driven dynamic multi-filter system.
+"""Sidebar-driven dynamic multi-filter system, form-gated.
 
 ================================================================================
-WHY THIS LIVES IN THE SIDEBAR
+WHY THIS IS FORM-GATED
 ================================================================================
-The sidebar is the canonical home for filtering controls in analytics SaaS
-products (Tableau filters pane, Datadog query rail, Looker filter panel).
-Keeping filters there leaves the main page free for visualizations, tables,
-and the analysis tabs.
+Filters drive every downstream cached analytic. A single keystroke in a
+Min textbox would otherwise:
+
+    1. trigger a full Streamlit rerun,
+    2. recompute the filter mask,
+    3. invalidate every cached EDA computation that depends on the
+       filtered DataFrame (overview, stats, missing, duplicates, outliers,
+       insights, all chart paths…),
+    4. re-render every visible tab.
+
+On a 200k-row × 100-column industrial dataset that cascade takes several
+seconds. The fix: put the per-column filter inputs inside an
+``st.form()``. Streamlit batches widget changes inside a form until the
+``form_submit_button`` is clicked, so analysis only re-runs when the
+user explicitly applies their filters.
+
+Column pickers (which decide WHICH filter widgets to render) sit OUTSIDE
+the form so they update the form's content immediately — picking a
+column then submitting an empty filter for it is the natural flow.
 
 ================================================================================
 PUBLIC API
@@ -23,17 +38,15 @@ PUBLIC API
         use ``modules.exporter.render_export_ui`` (multi-format).
 
 ================================================================================
-DESIGN NOTES
+SESSION STATE KEYS
 ================================================================================
-* Renders inside ``with st.sidebar:`` so the whole panel scrolls
-  vertically with the rest of the sidebar.
-* Two-column layout used for Min / Max numeric inputs (they're short
-  and benefit from being side-by-side); single-column elsewhere because
-  the sidebar is narrow.
-* All widgets persist via ``st.session_state`` keys prefixed ``flt_``,
-  so the Reset button can wipe them in one pass.
-* Inline impact summary at the bottom (compact text, not metric cards —
-  cards stack ugly in narrow columns).
+    flt_choose_num    : list[str] — picked numerical columns (outside form)
+    flt_choose_cat    : list[str] — picked categorical columns (outside form)
+    flt_num_min_{col} : str       — committed Min for that column
+    flt_num_max_{col} : str       — committed Max for that column
+    flt_cat_{col}     : list[str] — committed selected values
+
+All keys are prefixed ``flt_`` so the Reset button can wipe them in one pass.
 """
 
 from __future__ import annotations
@@ -50,12 +63,20 @@ _MAX_CATEGORICAL_UNIQUE = 200
 
 
 def render_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Render the filter panel in the sidebar; return (filtered_df, summary)."""
+    """Render the filter panel in the sidebar; return (filtered_df, summary).
+
+    Behaviour:
+        * Column-picker changes show / hide form widgets immediately.
+        * Min/Max/multiselect changes inside the form are buffered.
+        * Nothing downstream re-runs until the user clicks **Apply Filters**.
+        * Reset button (outside the form) wipes all filter state immediately.
+    """
     with st.sidebar:
         st.markdown("---")
         st.markdown("### 🔍 Filters")
         st.caption(
-            "Narrow the dataset before EDA. All filters combine with AND."
+            "Pick columns, configure values, then click **Apply Filters**. "
+            "No analysis re-runs until you apply."
         )
 
         if df is None or df.empty:
@@ -71,9 +92,10 @@ def render_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
             if df[c].nunique(dropna=True) <= _MAX_CATEGORICAL_UNIQUE
         ]
 
-        # --- Column picker -----------------------------------------------
-        # Single-column layout: the sidebar is too narrow for side-by-side
-        # multi-selects (their pills wrap awkwardly).
+        # --- Column pickers (OUTSIDE the form) ----------------------------
+        # Outside the form so picking a new column immediately renders its
+        # Min/Max or multi-select. These pickers are cheap — they don't
+        # touch the dataframe.
         chosen_numeric = st.multiselect(
             "Numerical columns to filter",
             numeric_cols,
@@ -95,95 +117,132 @@ def render_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
             placeholder="Pick categorical columns…",
         )
 
+        # --- Per-column filter widgets (INSIDE the form) ------------------
+        # Streamlit batches widget changes inside a form until submit, so
+        # nothing downstream re-runs while the user is typing / picking
+        # values. The Apply button is what actually triggers the cascade.
+        with st.form("flt_apply_form", clear_on_submit=False, border=False):
+            if not chosen_numeric and not chosen_categorical:
+                st.caption(
+                    "Pick one or more columns above to configure filters."
+                )
+
+            if chosen_numeric:
+                st.markdown("##### Numerical ranges")
+                st.caption("Leave a field blank to leave that bound open.")
+                for col in chosen_numeric:
+                    series = df[col].dropna()
+                    if series.empty:
+                        st.caption(f"`{col}`: no non-null values — skipped.")
+                        continue
+                    col_min, col_max = float(series.min()), float(series.max())
+
+                    st.markdown(
+                        f"**{col}**  \n"
+                        f"<span style='color:#64748B;font-size:0.82em'>"
+                        f"range: {col_min:g} → {col_max:g}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    cc1, cc2 = st.columns(2)
+                    with cc1:
+                        st.text_input(
+                            "Min",
+                            value="",
+                            key=f"flt_num_min_{col}",
+                            placeholder=f"{col_min:g}",
+                        )
+                    with cc2:
+                        st.text_input(
+                            "Max",
+                            value="",
+                            key=f"flt_num_max_{col}",
+                            placeholder=f"{col_max:g}",
+                        )
+
+            if chosen_categorical:
+                st.markdown("##### Categorical values")
+                st.caption("Leave a multi-select empty to keep all values.")
+                for col in chosen_categorical:
+                    options = sorted(
+                        df[col].dropna().astype(str).unique().tolist()
+                    )
+                    st.multiselect(
+                        col,
+                        options,
+                        default=[],
+                        key=f"flt_cat_{col}",
+                        placeholder=f"Pick values for {col}…",
+                    )
+
+            st.form_submit_button(
+                "✅ Apply Filters",
+                type="primary",
+                use_container_width=True,
+            )
+
+        # --- Compute mask from the LAST-COMMITTED values ------------------
+        # st.session_state holds the last-submitted value for each form
+        # widget. Reading from session_state (not from local variables) is
+        # what makes the filter "sticky" — the mask reflects the last
+        # applied state regardless of in-progress edits.
         mask = pd.Series(True, index=df.index)
         applied: list[str] = []
 
-        # --- Numerical filters -------------------------------------------
-        if chosen_numeric:
-            st.markdown("##### Numerical ranges")
-            st.caption("Leave a field blank to leave that bound open.")
-            for col in chosen_numeric:
-                series = df[col].dropna()
-                if series.empty:
-                    st.caption(f"`{col}`: no non-null values — skipped.")
-                    continue
-                col_min, col_max = float(series.min()), float(series.max())
+        for col in chosen_numeric:
+            if col not in df.columns:
+                continue
+            series = df[col].dropna()
+            if series.empty:
+                continue
+            col_min, col_max = float(series.min()), float(series.max())
 
-                # Column label + data-range hint on its own line, then
-                # Min / Max side-by-side underneath.
-                st.markdown(
-                    f"**{col}**  \n"
-                    f"<span style='color:#64748B;font-size:0.82em'>"
-                    f"range: {col_min:g} → {col_max:g}</span>",
-                    unsafe_allow_html=True,
+            min_str = st.session_state.get(f"flt_num_min_{col}", "") or ""
+            max_str = st.session_state.get(f"flt_num_max_{col}", "") or ""
+            min_v = _parse_num(min_str)
+            max_v = _parse_num(max_str)
+
+            if min_str.strip() and min_v is None:
+                st.warning(f"`{col}`: Min is not a number — ignored.")
+            if max_str.strip() and max_v is None:
+                st.warning(f"`{col}`: Max is not a number — ignored.")
+
+            effective_min = min_v if min_v is not None else col_min
+            effective_max = max_v if max_v is not None else col_max
+
+            if effective_min > effective_max:
+                st.error(
+                    f"`{col}`: Min ({effective_min:g}) > Max "
+                    f"({effective_max:g}) — filter skipped."
                 )
-                cc1, cc2 = st.columns(2)
-                with cc1:
-                    min_str = st.text_input(
-                        "Min",
-                        value="",
-                        key=f"flt_num_min_{col}",
-                        placeholder=f"{col_min:g}",
-                    )
-                with cc2:
-                    max_str = st.text_input(
-                        "Max",
-                        value="",
-                        key=f"flt_num_max_{col}",
-                        placeholder=f"{col_max:g}",
-                    )
+                continue
 
-                min_v = _parse_num(min_str)
-                max_v = _parse_num(max_str)
-
-                if min_str.strip() and min_v is None:
-                    st.warning(f"`{col}`: Min is not a number — ignored.")
-                if max_str.strip() and max_v is None:
-                    st.warning(f"`{col}`: Max is not a number — ignored.")
-
-                effective_min = min_v if min_v is not None else col_min
-                effective_max = max_v if max_v is not None else col_max
-
-                if effective_min > effective_max:
-                    st.error(
-                        f"`{col}`: Min ({effective_min:g}) > Max "
-                        f"({effective_max:g}) — filter skipped."
-                    )
-                    continue
-
-                if min_v is not None or max_v is not None:
-                    mask &= df[col].between(effective_min, effective_max)
-                    applied.append(
-                        f"`{col}` ∈ [{effective_min:g}, {effective_max:g}]"
-                    )
-
-        # --- Categorical filters -----------------------------------------
-        if chosen_categorical:
-            st.markdown("##### Categorical values")
-            st.caption("Leave a multi-select empty to keep all values.")
-            for col in chosen_categorical:
-                options = sorted(df[col].dropna().astype(str).unique().tolist())
-                selected = st.multiselect(
-                    col,
-                    options,
-                    default=[],
-                    key=f"flt_cat_{col}",
-                    placeholder=f"Pick values for {col}…",
+            if min_v is not None or max_v is not None:
+                mask &= df[col].between(effective_min, effective_max)
+                applied.append(
+                    f"`{col}` ∈ [{effective_min:g}, {effective_max:g}]"
                 )
-                if selected:
-                    mask &= df[col].astype(str).isin(selected)
-                    applied.append(
-                        f"`{col}` in {len(selected)} of {len(options)} values"
-                    )
+
+        for col in chosen_categorical:
+            if col not in df.columns:
+                continue
+            selected = list(st.session_state.get(f"flt_cat_{col}", []) or [])
+            if selected:
+                # Compute options count so the rule message is informative
+                # without scanning the full column twice.
+                options_count = df[col].nunique(dropna=True)
+                mask &= df[col].astype(str).isin(selected)
+                applied.append(
+                    f"`{col}` in {len(selected)} of {options_count} values"
+                )
 
         filtered = df[mask].copy()
         summary = _summary(df, filtered, applied)
 
-        # --- Impact summary + reset --------------------------------------
+        # --- Impact summary + reset (outside the form) --------------------
         st.markdown("---")
         if applied:
-            # Compact text summary instead of metric cards — cards stack
-            # awkwardly in the narrow sidebar column.
+            # Compact text summary — metric cards stack ugly in a narrow
+            # sidebar column.
             st.markdown(
                 f"**{summary['filtered_rows']:,}** of "
                 f"**{summary['original_rows']:,}** rows kept "

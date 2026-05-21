@@ -370,25 +370,39 @@ def _render_dtype_section(df: pd.DataFrame) -> None:
         st.caption("No columns left to convert.")
         return
 
-    c1, c2, c3 = st.columns([3, 2, 1])
-    with c1:
-        col_to_convert = st.selectbox(
-            "Column",
-            options=["(select)"] + remaining_cols,
-            key="ppx_col_picker",
-        )
-    with c2:
-        target_dtype = st.selectbox(
-            "Target dtype",
-            options=SUPPORTED_DTYPES,
-            key="ppx_dtype_picker",
-        )
-    with c3:
-        st.markdown("&nbsp;", unsafe_allow_html=True)
-        if st.button("Apply", key="ppx_apply"):
-            if col_to_convert != "(select)":
-                st.session_state.manual_dtypes[col_to_convert] = target_dtype
-                st.rerun()
+    # Form-gated so the Column and Target-dtype dropdowns DON'T fire a
+    # rerun on every change. Streamlit batches the widget changes inside
+    # the form until the submit button is clicked, so the rest of the
+    # app (load cache lookup, sanitization re-evaluation, tab re-renders)
+    # only runs when the user explicitly applies a conversion.
+    with st.form("ppx_dtype_form", clear_on_submit=False, border=False):
+        c1, c2, c3 = st.columns([3, 2, 1])
+        with c1:
+            st.selectbox(
+                "Column",
+                options=["(select)"] + remaining_cols,
+                key="ppx_col_picker",
+            )
+        with c2:
+            st.selectbox(
+                "Target dtype",
+                options=SUPPORTED_DTYPES,
+                key="ppx_dtype_picker",
+            )
+        with c3:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+            submitted = st.form_submit_button(
+                "Apply", use_container_width=True,
+            )
+
+    if submitted:
+        col_to_convert = st.session_state.get("ppx_col_picker", "(select)")
+        target_dtype = st.session_state.get("ppx_dtype_picker", SUPPORTED_DTYPES[0])
+        if col_to_convert != "(select)":
+            st.session_state.manual_dtypes[col_to_convert] = target_dtype
+            # ``st.form_submit_button`` already triggers a rerun when
+            # clicked, so an explicit st.rerun() here would be a no-op
+            # at best and a double-rerun at worst.
 
     st.caption(
         "Tip: for date/time columns with non-standard formats, use the "
