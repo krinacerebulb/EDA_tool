@@ -811,6 +811,8 @@ with tabs[3]:
             elif not numeric_cols:
                 st.info("No numeric columns available to plot.")
             else:
+                viz_freq_labels = list(iviz.TIME_AGG_FREQUENCIES.keys())
+                viz_agg_func_labels = list(iviz.TIME_AGG_FUNCTIONS.keys())
                 with st.form("viz_ml_form", clear_on_submit=False, border=False):
                     c1, c2 = st.columns([1, 2])
                     with c1:
@@ -829,17 +831,30 @@ with tabs[3]:
                                 "y-axis is added automatically."
                             ),
                         )
-                    st.selectbox(
-                        "Aggregation",
-                        ["None", "Daily", "Monthly"],
-                        index=0,
-                        key="ml_agg",
-                        help=(
-                            "Aggregate (mean) into Daily or Monthly buckets "
-                            "before plotting. Choose ``None`` to plot every "
-                            "raw row."
-                        ),
-                    )
+                    c3, c4 = st.columns(2)
+                    with c3:
+                        st.selectbox(
+                            "Aggregation interval",
+                            viz_freq_labels,
+                            index=0,
+                            key="ml_agg",
+                            help=(
+                                "Resample into wall-clock buckets before "
+                                "plotting. Choose ``None`` to plot every raw "
+                                "row."
+                            ),
+                        )
+                    with c4:
+                        st.selectbox(
+                            "Aggregation function",
+                            viz_agg_func_labels,
+                            index=0,
+                            key="ml_agg_func",
+                            help=(
+                                "Function applied inside each aggregation "
+                                "bucket (only used when an interval is set)."
+                            ),
+                        )
                     built = st.form_submit_button(
                         "📊 Build time-series chart",                        use_container_width=True,
                     )
@@ -848,10 +863,11 @@ with tabs[3]:
                         st.session_state["ml_date"],
                         tuple(st.session_state["ml_values"]),
                         st.session_state["ml_agg"],
+                        st.session_state["ml_agg_func"],
                     )
                 cfg = st.session_state.get("_viz_ml_cfg")
                 if cfg:
-                    ml_date, ml_values, ml_agg = cfg
+                    ml_date, ml_values, ml_agg, ml_agg_func = cfg
                     ml_values = list(ml_values)
                     if not ml_values:
                         st.info("Select at least one numeric column and rebuild.")
@@ -861,6 +877,7 @@ with tabs[3]:
                             date_col=ml_date,
                             value_cols=ml_values,
                             aggregation=ml_agg,
+                            agg_func=ml_agg_func,
                         )
                         if fig is None:
                             st.warning(
@@ -899,6 +916,13 @@ with tabs[4]:
     elif not ts_value_candidates:
         st.info("No numeric columns available to use as the time-series value.")
     else:
+        rolling_unit_choices = {
+            "minutes": "min",
+            "hours":   "h",
+            "days":    "D",
+        }
+        unit_labels = list(rolling_unit_choices.keys())
+
         with st.form("ts_form", clear_on_submit=False, border=False):
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -911,18 +935,35 @@ with tabs[4]:
                 )
             with c3:
                 st.checkbox(
-                    "Rolling average", value=False, key="ts_smooth",
+                    "Rolling window", value=False, key="ts_smooth",
+                    help=(
+                        "Overlay a time-based rolling mean. The window "
+                        "width is a wall-clock interval and tolerates "
+                        "irregular sensor timestamps."
+                    ),
                 )
-            # Rolling-window slider sits inside the form even though it's
-            # only meaningful when smoothing is on — keeps everything
-            # batched under one submit.
-            st.slider(
-                "Rolling window (data points — number of rows per average)",
-                min_value=2,
-                max_value=60,
-                value=7,
-                key="ts_window",
-            )
+            c4, c5 = st.columns(2)
+            with c4:
+                st.number_input(
+                    "Rolling window size",
+                    min_value=1,
+                    max_value=10_000,
+                    value=1,
+                    step=1,
+                    key="ts_window_size",
+                    help=(
+                        "How many of the unit chosen on the right (e.g. 15 "
+                        "minutes, 4 hours, 7 days)."
+                    ),
+                )
+            with c5:
+                st.selectbox(
+                    "Rolling window unit",
+                    unit_labels,
+                    index=unit_labels.index("hours"),
+                    key="ts_window_unit",
+                    help="Wall-clock unit for the rolling window width.",
+                )
             built = st.form_submit_button(
                 "📊 Plot time series",                use_container_width=True,
             )
@@ -932,13 +973,21 @@ with tabs[4]:
                 st.session_state["ts_date"],
                 st.session_state["ts_value"],
                 bool(st.session_state["ts_smooth"]),
-                int(st.session_state["ts_window"]),
+                int(st.session_state["ts_window_size"]),
+                st.session_state["ts_window_unit"],
             )
 
         cfg = st.session_state.get("_ts_cfg")
         if cfg:
-            date_col, value_col, apply_smoothing, window = cfg
-            rolling_window = window if apply_smoothing else None
+            date_col, value_col, apply_smoothing, window_size, window_unit = cfg
+            offset_alias = rolling_unit_choices.get(window_unit, "h")
+            rolling_window = (
+                f"{window_size}{offset_alias}" if apply_smoothing else None
+            )
+            rolling_display_label = (
+                f"Rolling mean ({window_size} {window_unit})"
+                if apply_smoothing else None
+            )
 
             if date_col not in df.columns or value_col not in df.columns:
                 st.info(
@@ -963,6 +1012,7 @@ with tabs[4]:
                         ts_mod.time_series_plot(
                             prepared, date_col, value_col,
                             rolling_window=rolling_window,
+                            rolling_label=rolling_display_label,
                         ),
                         width="stretch",
                     )
@@ -1097,6 +1147,12 @@ with tabs[5]:
             target_datetime_cols = ts_mod.detect_datetime_columns(df)
             if target_datetime_cols:
                 st.markdown("### Target over time")
+                tgt_agg_func_labels = list(iviz.TIME_AGG_FUNCTIONS.keys())
+                # Daily buckets are a sensible default for industrial sensor
+                # data — keeps the chart responsive on long series. The user
+                # still chooses the aggregation function (Avg / Sum / Count
+                # / Std) below.
+                tgt_default_interval = "Daily"
                 with st.form("target_line_form", clear_on_submit=False, border=False):
                     st.selectbox(
                         "Date column",
@@ -1104,10 +1160,14 @@ with tabs[5]:
                         key="target_line_date",
                     )
                     st.selectbox(
-                        "Aggregation",
-                        ["None", "Daily", "Monthly"],
-                        index=1 if len(df) > 500 else 0,
-                        key="target_line_agg",
+                        "Aggregation function",
+                        tgt_agg_func_labels,
+                        index=0,
+                        key="target_line_agg_func",
+                        help=(
+                            "Function applied across daily buckets of the "
+                            "target column."
+                        ),
                     )
                     line_built = st.form_submit_button(
                         "📊 Plot target over time",                        use_container_width=True,
@@ -1116,13 +1176,14 @@ with tabs[5]:
                     st.session_state["_target_line_cfg"] = (
                         target,
                         st.session_state["target_line_date"],
-                        st.session_state["target_line_agg"],
+                        st.session_state["target_line_agg_func"],
                     )
                 line_cfg = st.session_state.get("_target_line_cfg")
                 if line_cfg and line_cfg[0] == target:
-                    _, ld, la = line_cfg
+                    _, ld, la_func = line_cfg
                     line_fig = iviz.multi_line_time_series(
-                        df, date_col=ld, value_cols=[target], aggregation=la,
+                        df, date_col=ld, value_cols=[target],
+                        aggregation=tgt_default_interval, agg_func=la_func,
                     )
                     if line_fig is None:
                         st.info(

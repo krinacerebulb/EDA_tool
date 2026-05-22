@@ -255,12 +255,34 @@ _LINE_COLORS = [
 
 _DUAL_AXIS_RATIO = 10.0
 
+# Aggregation frequency aliases exposed in the UI. Values are pandas offset
+# aliases — passed straight into ``DataFrame.resample(...)``.
+TIME_AGG_FREQUENCIES: dict[str, str | None] = {
+    "None":       None,
+    "5 minutes":  "5min",
+    "15 minutes": "15min",
+    "30 minutes": "30min",
+    "Hourly":     "1h",
+    "Daily":      "D",
+    "Monthly":    "MS",
+}
+
+# Aggregation functions exposed in the UI. Maps user-facing label → pandas
+# method name accepted by ``Resampler.agg``.
+TIME_AGG_FUNCTIONS: dict[str, str] = {
+    "Average":            "mean",
+    "Sum":                "sum",
+    "Count":              "count",
+    "Standard Deviation": "std",
+}
+
 
 def _aggregate_time_series(
     df: pd.DataFrame,
     date_col: str,
     value_cols: list[str],
     freq: str | None,
+    agg_func: str = "mean",
 ) -> pd.DataFrame:
     work = df[[date_col, *value_cols]].copy()
     work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
@@ -272,7 +294,7 @@ def _aggregate_time_series(
         work = (
             work.set_index(date_col)
             .resample(freq)[value_cols]
-            .mean()
+            .agg(agg_func)
             .reset_index()
         )
     return work
@@ -312,21 +334,24 @@ def multi_line_time_series(
     date_col: str,
     value_cols: list[str],
     aggregation: str = "None",
+    agg_func: str = "Average",
 ) -> go.Figure | None:
     """Interactive multi-line time series with optional dual y-axis.
 
     Stays on Plotly so users can zoom and brush across long industrial time
-    series. ``aggregation`` ("Daily" / "Monthly") deterministically resamples
-    by mean — this is *aggregation*, not random sampling, and is fully
-    user-controlled. With ``aggregation="None"`` every raw row is plotted.
+    series. ``aggregation`` selects the time bucket (e.g. "5 minutes",
+    "Hourly", "Daily", "Monthly"); ``agg_func`` selects the reduction
+    applied inside each bucket (Average / Sum / Count / Standard Deviation).
+    This is *aggregation*, not random sampling, and is fully user-controlled.
+    With ``aggregation="None"`` every raw row is plotted.
     """
     if not value_cols:
         return None
 
-    freq_map = {"None": None, "Daily": "D", "Monthly": "MS"}
-    freq = freq_map.get(aggregation)
+    freq = TIME_AGG_FREQUENCIES.get(aggregation)
+    fn = TIME_AGG_FUNCTIONS.get(agg_func, "mean")
 
-    work = _aggregate_time_series(df, date_col, value_cols, freq)
+    work = _aggregate_time_series(df, date_col, value_cols, freq, agg_func=fn)
     if work.empty:
         return None
 

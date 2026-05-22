@@ -177,17 +177,53 @@ def prepare_series(
     return out
 
 
+def _apply_time_rolling(
+    prepared: pd.DataFrame,
+    date_col: str,
+    value_col: str,
+    window: str,
+    agg_func: str,
+) -> pd.Series:
+    """Compute a time-based rolling aggregate keyed by ``date_col``.
+
+    Returns a Series aligned to ``prepared.index`` so the caller can plot it
+    on the original x-axis. Time-based rolling tolerates irregular cadences
+    (e.g. industrial sensor data with missing timestamps).
+    """
+    indexed = prepared.set_index(date_col)[value_col].sort_index()
+    roller = indexed.rolling(window)
+    agg_map = {
+        "mean":  roller.mean,
+        "sum":   roller.sum,
+        "count": roller.count,
+        "std":   roller.std,
+    }
+    smoothed = agg_map.get(agg_func, roller.mean)()
+    # Re-align to the prepared frame's row order (caller may not be sorted
+    # by index, even though we sort by date inside prepare_series).
+    smoothed.index = pd.to_datetime(smoothed.index)
+    return smoothed
+
+
 def time_series_plot(
     prepared: pd.DataFrame,
     date_col: str,
     value_col: str,
-    rolling_window: int | None = None,
+    rolling_window: str | None = None,
+    rolling_agg: str = "mean",
+    rolling_label: str | None = None,
 ) -> go.Figure:
     """Interactive line chart with zoom, hover, range slider, and smoothing.
 
     Plots every row of ``prepared`` — no downsampling. ``mode="lines"`` (no
     per-point markers) keeps Plotly responsive on long industrial series
     without discarding any data.
+
+    ``rolling_window`` is a pandas time-offset string (e.g. ``"5min"``,
+    ``"1h"``, ``"1D"``). Time-based rolling works on irregular timestamps —
+    each value summarises the rows whose timestamps fall inside the
+    wall-clock window ending at the current row. ``rolling_agg`` chooses
+    the aggregation (``mean``, ``sum``, ``count``, ``std``).
     """
     fig = go.Figure()
 
@@ -203,18 +239,17 @@ def time_series_plot(
         )
     )
 
-    if rolling_window and rolling_window > 1 and len(prepared) >= rolling_window:
-        smoothed = (
-            prepared[value_col]
-            .rolling(window=rolling_window, min_periods=1)
-            .mean()
+    if rolling_window and len(prepared) >= 2:
+        smoothed = _apply_time_rolling(
+            prepared, date_col, value_col, rolling_window, rolling_agg,
         )
+        label = rolling_label or f"Rolling {rolling_agg} ({rolling_window})"
         fig.add_trace(
             go.Scatter(
-                x=prepared[date_col],
-                y=smoothed,
+                x=smoothed.index,
+                y=smoothed.values,
                 mode="lines",
-                name=f"Rolling mean ({rolling_window})",
+                name=label,
                 line=dict(color="#EF553B", width=3),
             )
         )
