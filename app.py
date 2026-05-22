@@ -450,7 +450,7 @@ with tabs[0]:
 
 # ---------- Cleaning ----------
 with tabs[1]:
-    st.subheader("Auto-Sanitization Report")
+    st.subheader("Data Preprocessing Report")
     st.caption(
         "Production sanitization layer — runs once on load. Cleans industrial "
         "dirty tokens (*No Data*, *Bad*, *Sensor Fail*, Excel errors, ...), "
@@ -594,11 +594,44 @@ with tabs[1]:
         f"({dup_summary['duplicate_percent']}% of the dataset)."
     )
 
-    st.subheader("Outliers (IQR method)")
+    st.subheader("Outliers")
+    st.caption(
+        "Two complementary detectors. **IQR** is robust to skew (good default "
+        "for industrial sensor data); **Z-score** assumes a roughly normal "
+        "distribution and flags values more than `k` standard deviations from "
+        "the mean."
+    )
     if outliers.empty:
         st.info("No numeric columns to check for outliers.")
     else:
-        st.dataframe(outliers, width="stretch")
+        z_threshold = st.number_input(
+            "Z-score threshold (k)",
+            min_value=2.0, max_value=5.0, value=3.0, step=0.5,
+            help=(
+                "Values with |(x − mean) / std| > k are flagged as outliers. "
+                "k = 3 is the classical convention (~0.27% of values under a "
+                "normal distribution). Accepts any value between 2.0 and 5.0."
+            ),
+            key="outlier_zscore_threshold",
+        )
+        outliers_z = data_cleaning.detect_outliers_zscore(df, threshold=z_threshold)
+
+        outlier_tabs = st.tabs(["IQR method", f"Z-score (k = {z_threshold:g})"])
+        with outlier_tabs[0]:
+            st.caption(
+                "Flags values below Q1 − 1.5·IQR or above Q3 + 1.5·IQR. "
+                "Recommended for skewed or non-normal columns."
+            )
+            st.dataframe(outliers, width="stretch")
+        with outlier_tabs[1]:
+            st.caption(
+                f"Flags values with |z| > {z_threshold:g}. Columns with zero "
+                "variance produce no outliers."
+            )
+            if outliers_z.empty:
+                st.info("No numeric columns available for Z-score analysis.")
+            else:
+                st.dataframe(outliers_z, width="stretch")
 
     st.caption("Note: nothing is modified automatically — this is analysis only.")
 
@@ -673,7 +706,12 @@ with tabs[3]:
             else:
                 with st.form("viz_hist_form", clear_on_submit=False, border=False):
                     st.selectbox("Column", numeric_cols, key="hist_col")
-                    st.slider("Bins", 5, 100, 30, key="hist_bins")
+                    st.number_input(
+                        "Bins",
+                        min_value=5, max_value=100, value=30, step=1,
+                        key="hist_bins",
+                        help="Number of histogram buckets (5–100).",
+                    )
                     built = st.form_submit_button(
                         "📊 Build histogram",                        use_container_width=True,
                     )
@@ -766,7 +804,12 @@ with tabs[3]:
             else:
                 with st.form("viz_bar_form", clear_on_submit=False, border=False):
                     st.selectbox("Column", categorical_cols, key="bar_col")
-                    st.slider("Top N values", 3, 30, 10, key="bar_top_n")
+                    st.number_input(
+                        "Top N values",
+                        min_value=3, max_value=30, value=10, step=1,
+                        key="bar_top_n",
+                        help="How many of the most frequent categories to show (3–30).",
+                    )
                     built = st.form_submit_button(
                         "📊 Build bar chart",                        use_container_width=True,
                     )
@@ -1148,7 +1191,12 @@ with tabs[5]:
             # --- Distribution of the target (form-gated histogram) ---
             st.markdown("### Distribution of target")
             with st.form("target_hist_form", clear_on_submit=False, border=False):
-                st.slider("Bins", 5, 100, 30, key="target_hist_bins")
+                st.number_input(
+                    "Bins",
+                    min_value=5, max_value=100, value=30, step=1,
+                    key="target_hist_bins",
+                    help="Number of histogram buckets (5–100).",
+                )
                 hist_built = st.form_submit_button(
                     "📊 Plot distribution",                    use_container_width=True,
                 )
@@ -1259,8 +1307,11 @@ with tabs[5]:
             # --- Counts per category (form-gated bar chart) ---
             st.markdown(f"### Count per **{target}** category")
             with st.form("target_bar_form", clear_on_submit=False, border=False):
-                st.slider(
-                    "Top N categories", 3, 30, 10, key="target_bar_topn",
+                st.number_input(
+                    "Top N categories",
+                    min_value=3, max_value=30, value=10, step=1,
+                    key="target_bar_topn",
+                    help="How many of the most frequent categories to show (3–30).",
                 )
                 bar_built = st.form_submit_button(
                     "📊 Plot category counts",                    use_container_width=True,

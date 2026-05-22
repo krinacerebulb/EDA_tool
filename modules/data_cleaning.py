@@ -59,3 +59,48 @@ def detect_outliers_iqr(df: pd.DataFrame) -> pd.DataFrame:
             "Upper Bound": round(upper, 3),
         })
     return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def detect_outliers_zscore(df: pd.DataFrame, threshold: float = 3.0) -> pd.DataFrame:
+    """
+    Flag outliers per numeric column using the Z-score rule:
+    values whose |z| = |(x - mean) / std| exceeds ``threshold`` (default 3).
+
+    Columns with zero variance produce 0 outliers and NaN bounds — there's no
+    meaningful "extreme" when every value is identical.
+    """
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    rows = []
+    for col in numeric_cols:
+        series = df[col].dropna()
+        if series.empty:
+            rows.append({
+                "Column": col, "Outlier Count": 0, "Outlier %": 0.0,
+                "Mean": np.nan, "Std": np.nan,
+                "Lower Bound": np.nan, "Upper Bound": np.nan,
+            })
+            continue
+        mean = float(series.mean())
+        std  = float(series.std(ddof=0))
+        if std == 0 or np.isnan(std):
+            rows.append({
+                "Column": col, "Outlier Count": 0, "Outlier %": 0.0,
+                "Mean": round(mean, 3), "Std": round(std, 3),
+                "Lower Bound": np.nan, "Upper Bound": np.nan,
+            })
+            continue
+        lower, upper = mean - threshold * std, mean + threshold * std
+        mask = (series < lower) | (series > upper)
+        count = int(mask.sum())
+        percent = round((count / len(series) * 100), 2) if len(series) else 0.0
+        rows.append({
+            "Column": col,
+            "Outlier Count": count,
+            "Outlier %": percent,
+            "Mean": round(mean, 3),
+            "Std": round(std, 3),
+            "Lower Bound": round(lower, 3),
+            "Upper Bound": round(upper, 3),
+        })
+    return pd.DataFrame(rows)
