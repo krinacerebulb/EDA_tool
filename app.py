@@ -11,6 +11,8 @@ import streamlit as st
 
 LOGO_PATH = Path(__file__).parent / "assets" / "cb-logo-tagline-main.png"
 LOGO = str(LOGO_PATH) if LOGO_PATH.exists() else None
+FAVICON_PATH = Path(__file__).parent / "assets" / "image.png"
+FAVICON = str(FAVICON_PATH) if FAVICON_PATH.exists() else None
 
 from modules import (
     data_cleaning,
@@ -32,7 +34,7 @@ from utils.helpers import human_bytes, split_columns
 
 st.set_page_config(
     page_title="Auto EDA Platform",
-    page_icon=LOGO or ":bar_chart:",
+    page_icon=FAVICON or LOGO or ":bar_chart:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -1076,8 +1078,7 @@ with tabs[5]:
             tc1.metric("Total values", f"{tgt_summary['total']:,}")
             tc2.metric(
                 "Missing",
-                f"{tgt_summary['missing']:,}",
-                f"{tgt_summary['missing_pct']:.2f}%",
+                f"{tgt_summary['missing']:,} ({tgt_summary['missing_pct']:.2f}%)",
             )
             if numeric_target and tgt_summary.get("mean") is not None:
                 tc3.metric("Mean",   f"{tgt_summary['mean']:.2f}")
@@ -1109,7 +1110,28 @@ with tabs[5]:
             corr_df = target_analysis.correlations_with_target(df, target)
             if not corr_df.empty:
                 st.markdown("### Correlation with target")
-                st.dataframe(corr_df, width="stretch")
+
+                def _fmt_corr(v):
+                    if pd.isna(v):
+                        return ""
+                    arrow = "▲" if v >= 0 else "▼"
+                    return f"{arrow} {v:+.4f}"
+
+                def _color_corr(v):
+                    if pd.isna(v):
+                        return ""
+                    return (
+                        "color: #2ca02c; font-weight: 600;"
+                        if v >= 0
+                        else "color: #d62728; font-weight: 600;"
+                    )
+
+                styled_corr = (
+                    corr_df.style
+                    .format({"Correlation": _fmt_corr})
+                    .map(_color_corr, subset=["Correlation"])
+                )
+                st.dataframe(styled_corr, width="stretch")
 
                 strongest = corr_df.iloc[0]
                 st.markdown(
