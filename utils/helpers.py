@@ -18,10 +18,27 @@ def fig_to_base64(fig: plt.Figure) -> str:
 
 
 def split_columns(df: pd.DataFrame):
-    """Return (numeric_cols, categorical_cols, datetime_cols) based on dtypes."""
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
-    datetime_cols = df.select_dtypes(include=["datetime", "datetimetz"]).columns.tolist()
+    """Return (numeric_cols, categorical_cols, datetime_cols) based on dtypes.
+
+    Uses per-column dtype probes rather than ``select_dtypes`` because the
+    latter copies the matching block — wasteful when all the caller needs
+    are column names, and a real OOM risk on wide industrial datasets.
+    """
+    numeric_cols: list[str] = []
+    categorical_cols: list[str] = []
+    datetime_cols: list[str] = []
+    for c in df.columns:
+        s = df[c]
+        if pd.api.types.is_datetime64_any_dtype(s):
+            datetime_cols.append(c)
+        elif pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+            numeric_cols.append(c)
+        elif (
+            pd.api.types.is_object_dtype(s)
+            or isinstance(s.dtype, pd.CategoricalDtype)
+            or pd.api.types.is_bool_dtype(s)
+        ):
+            categorical_cols.append(c)
     return numeric_cols, categorical_cols, datetime_cols
 
 
@@ -37,6 +54,48 @@ def human_bytes(num: int) -> str:
 def plotly_template() -> str:
     """Return the active Plotly template. Light theme only."""
     return "plotly_white"
+
+
+_DEFAULT_DECIMAL_PRECISION = 2
+
+
+def get_decimal_precision(default: int = _DEFAULT_DECIMAL_PRECISION) -> int:
+    """Return the user's display precision (sidebar setting).
+
+    Falls back to ``default`` when the setting hasn't been initialised yet
+    (first paint, headless tests, etc.). The value only affects how
+    numbers are rendered — it never touches stored data.
+    """
+    try:
+        import streamlit as st
+        return int(st.session_state.get("decimal_precision", default))
+    except Exception:
+        return int(default)
+
+
+def fmt_num(value, precision: int | None = None, na_rep: str = "—") -> str:
+    """Format a single number for display using the active precision.
+
+    Integers are printed with thousands separators and no decimals; floats
+    use the chosen precision. ``NaN`` / ``None`` map to ``na_rep``.
+    """
+    if value is None:
+        return na_rep
+    try:
+        if isinstance(value, float) and pd.isna(value):
+            return na_rep
+    except Exception:
+        pass
+    p = get_decimal_precision() if precision is None else int(precision)
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(f):
+        return na_rep
+    if isinstance(value, (int,)) and not isinstance(value, bool):
+        return f"{value:,}"
+    return f"{f:,.{p}f}"
 
 
 def safe_dataframe(df, **kwargs):

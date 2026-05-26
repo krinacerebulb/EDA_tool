@@ -125,6 +125,77 @@ def load_dataset(uploaded_file) -> pd.DataFrame:
     return _read_bytes(uploaded_file.getvalue(), uploaded_file.name)
 
 
+def apply_header_overrides(
+    df: pd.DataFrame,
+    drop_first_n: int = 0,
+    promote_row_to_header: bool = False,
+) -> pd.DataFrame:
+    """Drop leading rows and optionally promote the next row to the header.
+
+    Industrial sensor exports often start with metadata, machine info, or
+    blank rows before the real header. This helper lets the UI fix those
+    files without re-uploading.
+
+    Order is: drop ``drop_first_n`` rows from the top, then (if requested)
+    take what is now the first row and use its values as the new column
+    names — that row is consumed in the process. Numeric-looking cells are
+    re-coerced via ``pd.to_numeric`` since the previously-parsed dtypes
+    were based on the wrong header.
+    """
+    drop_first_n = max(0, int(drop_first_n))
+    if drop_first_n == 0 and not promote_row_to_header:
+        return df
+
+    out = df
+    # Preserve the upstream sanitization metadata so downstream banners
+    # still describe what was cleaned on load.
+    original_attrs = dict(getattr(df, "attrs", {}) or {})
+    if drop_first_n > 0:
+        out = out.iloc[drop_first_n:].reset_index(drop=True)
+
+    if promote_row_to_header and len(out) > 0:
+        # Categorical columns can't accept arbitrary new values when we
+        # re-coerce later; demote them to object first so the row-promotion
+        # and subsequent numeric retry are unconstrained.
+        for c in out.columns:
+            if isinstance(out[c].dtype, pd.CategoricalDtype):
+                out[c] = out[c].astype(object)
+
+        new_header_row = out.iloc[0]
+        new_header: list[str] = []
+        seen: dict[str, int] = {}
+        for i, val in enumerate(new_header_row.tolist()):
+            name = "" if pd.isna(val) else str(val).strip()
+            if not name:
+                name = f"Unnamed_{i}"
+            if name in seen:
+                seen[name] += 1
+                name = f"{name}_{seen[name]}"
+            else:
+                seen[name] = 0
+            new_header.append(name)
+
+        out = out.iloc[1:].reset_index(drop=True)
+        out.columns = new_header
+
+        # Reading-with-wrong-header would have left numeric sensor columns
+        # parsed as object. Try a column-wise numeric coercion now that the
+        # real header is in place; leave anything that doesn't cleanly
+        # parse as-is for the downstream smart-conversion + sanitization
+        # passes to handle.
+        for c in out.columns:
+            if out[c].dtype == object:
+                coerced = pd.to_numeric(out[c], errors="coerce")
+                if coerced.notna().sum() == out[c].notna().sum() and coerced.notna().any():
+                    out[c] = coerced
+
+    try:
+        out.attrs.update(original_attrs)
+    except Exception:
+        pass
+    return out
+
+
 @st.cache_data(show_spinner=False)
 def detect_column_types(df: pd.DataFrame) -> pd.DataFrame:
     """Return a small DataFrame describing each column's detected type and non-null count."""

@@ -89,11 +89,18 @@ def histogram(df: pd.DataFrame, column: str, bins: int = 30) -> plt.Figure:
 
 
 def boxplot(df: pd.DataFrame, column: str) -> plt.Figure:
-    """Horizontal boxplot for a single numeric column (full data)."""
+    """Vertical boxplot for a single numeric column (full data).
+
+    Vertical orientation gives clearer comparisons across multiple
+    industrial features and matches the convention used in grouped
+    boxplots elsewhere in the app.
+    """
     series = df[column].dropna()
-    fig, ax = _new_axes(figsize=(_FIG_W, 2.6))
-    sns.boxplot(x=series, color=_BASE_COLOR, fliersize=2.0, ax=ax)
-    ax.set_xlabel(column)
+    fig, ax = _new_axes(figsize=(3.6, 5.0))
+    sns.boxplot(y=series, color=_BASE_COLOR, fliersize=2.0, ax=ax, width=0.45)
+    ax.set_ylabel(column)
+    ax.set_xlabel("")
+    ax.set_xticks([])
     ax.set_title(f"Boxplot of {column}", fontsize=11, fontweight="600")
     fig.tight_layout()
     return fig
@@ -180,7 +187,10 @@ def scatter(
     return fig
 
 
-def correlation_heatmap(df: pd.DataFrame) -> go.Figure | None:
+def correlation_heatmap(
+    df: pd.DataFrame,
+    precision: int = 2,
+) -> go.Figure | None:
     """Interactive Plotly correlation heatmap on every numeric column.
 
     Plotly is used here (rather than matplotlib) so users can hover any cell
@@ -194,11 +204,12 @@ def correlation_heatmap(df: pd.DataFrame) -> go.Figure | None:
     if numeric.shape[1] < 2:
         return None
 
-    corr = numeric.corr().round(3)
+    p = max(0, int(precision))
+    corr = numeric.corr().round(max(p, 3))
     n = corr.shape[0]
 
     # Inline annotations off past ~25 columns — values stay on hover anyway.
-    text_auto: str | bool = ".2f" if n <= 25 else False
+    text_auto: str | bool = f".{p}f" if n <= 25 else False
 
     # Height scales with column count so labels don't crush together.
     height = max(420, min(1100, 28 * n + 160))
@@ -219,6 +230,205 @@ def correlation_heatmap(df: pd.DataFrame) -> go.Figure | None:
     )
     fig.update_xaxes(tickangle=45, tickfont=dict(size=10))
     fig.update_yaxes(tickfont=dict(size=10))
+    return fig
+
+
+def outlier_scatter(
+    df: pd.DataFrame,
+    column: str,
+    x_col: str | None = None,
+    method: str = "iqr",
+    k: float = 1.5,
+    z_threshold: float = 3.0,
+    color_by: str | None = None,
+    precision: int = 2,
+    start_dt: pd.Timestamp | None = None,
+    end_dt: pd.Timestamp | None = None,
+) -> go.Figure | None:
+    """Interactive Plotly scatter that paints outliers in a distinct colour.
+
+    Useful in industrial EDA for spotting sensor drift, bad reads, or
+    extreme operational events at a glance. Normal points render in
+    muted blue; outliers render in bright red with horizontal dashed
+    lines marking the lower / upper bounds.
+
+    Parameters
+    ----------
+    column
+        Numeric column to inspect.
+    x_col
+        Optional column for the X axis. Datetime or numeric columns are
+        used as-is; anything else falls back to row index. ``None`` →
+        row index.
+    method
+        ``"iqr"`` (default) flags points outside [Q1 − k·IQR, Q3 + k·IQR].
+        ``"zscore"`` flags points with |z| > ``z_threshold``.
+    color_by
+        Optional categorical column. When set, INLIER markers are coloured
+        by this column so per-group context (e.g. machine ID, shift) is
+        visible alongside outlier flags. Outliers stay red regardless.
+    start_dt, end_dt
+        Optional time window. Only applied when ``x_col`` is a datetime
+        column; restricts both the outlier statistics and the plot to
+        the chosen operational window (e.g. one shift).
+    """
+    if column not in df.columns:
+        return None
+
+    df_in = df
+    if (
+        (start_dt is not None or end_dt is not None)
+        and x_col
+        and x_col in df.columns
+    ):
+        parsed_dt = pd.to_datetime(df[x_col], errors="coerce")
+        mask = pd.Series(True, index=df.index)
+        if start_dt is not None:
+            mask &= parsed_dt >= pd.Timestamp(start_dt)
+        if end_dt is not None:
+            mask &= parsed_dt <= pd.Timestamp(end_dt)
+        df_in = df.loc[mask]
+        if df_in.empty:
+            return None
+
+    s = pd.to_numeric(df_in[column], errors="coerce")
+    mask_valid = s.notna()
+    if not mask_valid.any():
+        return None
+
+    s_clean = s[mask_valid]
+
+    # --- Outlier mask -----------------------------------------------------
+    if method == "zscore":
+        mean = float(s_clean.mean())
+        std = float(s_clean.std(ddof=0))
+        if std == 0 or np.isnan(std):
+            is_outlier = pd.Series(False, index=s_clean.index)
+            lower = upper = float("nan")
+        else:
+            lower = mean - z_threshold * std
+            upper = mean + z_threshold * std
+            is_outlier = (s_clean < lower) | (s_clean > upper)
+        bounds_label = f"Z-score (k = {z_threshold:g})"
+    else:
+        q1 = float(s_clean.quantile(0.25))
+        q3 = float(s_clean.quantile(0.75))
+        iqr = q3 - q1
+        lower = q1 - k * iqr
+        upper = q3 + k * iqr
+        is_outlier = (s_clean < lower) | (s_clean > upper)
+        bounds_label = f"IQR (k = {k:g})"
+
+    # --- X axis -----------------------------------------------------------
+    if x_col and x_col in df_in.columns:
+        x_series = df_in.loc[mask_valid, x_col]
+        if pd.api.types.is_datetime64_any_dtype(df_in[x_col]) or pd.api.types.is_numeric_dtype(df_in[x_col]):
+            x_label = x_col
+        else:
+            x_series = pd.to_datetime(x_series, errors="coerce")
+            x_label = x_col
+    else:
+        x_series = pd.Series(range(len(s_clean)), index=s_clean.index)
+        x_label = "Row index"
+
+    p = max(0, int(precision))
+    n_total = int(mask_valid.sum())
+    n_out = int(is_outlier.sum())
+    out_pct = (n_out / n_total * 100) if n_total else 0.0
+
+    fig = go.Figure()
+
+    # --- Inliers ---------------------------------------------------------
+    inlier_idx = s_clean.index[~is_outlier]
+    if color_by and color_by in df_in.columns and len(inlier_idx) > 0:
+        # Group-coloured inliers using a tab10-style palette.
+        groups = df_in.loc[inlier_idx, color_by].astype(str)
+        palette = [
+            "#2C7BE5", "#19C37D", "#AB63FA", "#19D3F3",
+            "#FFA15A", "#B6E880", "#FF97FF", "#FECB52",
+        ]
+        for i, (grp, idxs) in enumerate(groups.groupby(groups).groups.items()):
+            fig.add_trace(go.Scatter(
+                x=x_series.loc[idxs],
+                y=s_clean.loc[idxs],
+                mode="markers",
+                name=f"{grp}",
+                marker=dict(
+                    color=palette[i % len(palette)],
+                    size=5, opacity=0.6,
+                ),
+                hovertemplate=(
+                    f"{x_label}: %{{x}}<br>"
+                    f"{column}: %{{y:.{p}f}}<br>"
+                    f"{color_by}: {grp}<extra></extra>"
+                ),
+            ))
+    elif len(inlier_idx) > 0:
+        fig.add_trace(go.Scatter(
+            x=x_series.loc[inlier_idx],
+            y=s_clean.loc[inlier_idx],
+            mode="markers",
+            name=f"Normal ({n_total - n_out:,})",
+            marker=dict(color="#2C7BE5", size=5, opacity=0.55),
+            hovertemplate=(
+                f"{x_label}: %{{x}}<br>"
+                f"{column}: %{{y:.{p}f}}<extra></extra>"
+            ),
+        ))
+
+    # --- Outliers (always red, on top) -----------------------------------
+    outlier_idx = s_clean.index[is_outlier]
+    if len(outlier_idx) > 0:
+        fig.add_trace(go.Scatter(
+            x=x_series.loc[outlier_idx],
+            y=s_clean.loc[outlier_idx],
+            mode="markers",
+            name=f"Outlier ({n_out:,})",
+            marker=dict(
+                color="#EF553B",
+                size=9,
+                opacity=0.95,
+                symbol="diamond",
+                line=dict(color="#7F1D1D", width=1),
+            ),
+            hovertemplate=(
+                f"<b>OUTLIER</b><br>"
+                f"{x_label}: %{{x}}<br>"
+                f"{column}: %{{y:.{p}f}}<extra></extra>"
+            ),
+        ))
+
+    # --- Bound lines -----------------------------------------------------
+    if not (np.isnan(upper) or np.isnan(lower)):
+        fig.add_hline(
+            y=upper,
+            line=dict(color="#EF553B", dash="dash", width=1),
+            annotation_text=f"Upper {upper:.{p}f}",
+            annotation_position="top right",
+            annotation_font=dict(color="#7F1D1D", size=10),
+        )
+        fig.add_hline(
+            y=lower,
+            line=dict(color="#EF553B", dash="dash", width=1),
+            annotation_text=f"Lower {lower:.{p}f}",
+            annotation_position="bottom right",
+            annotation_font=dict(color="#7F1D1D", size=10),
+        )
+
+    fig.update_layout(
+        title=(
+            f"Outlier detection — {column} · {bounds_label} · "
+            f"{n_out:,} of {n_total:,} flagged ({out_pct:.{p}f}%)"
+        ),
+        xaxis_title=x_label,
+        yaxis_title=column,
+        template=plotly_template(),
+        hovermode="closest",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        margin=dict(l=10, r=10, t=70, b=10),
+    )
+    if precision is not None:
+        fig.update_yaxes(tickformat=f".{p}f")
     return fig
 
 
@@ -268,8 +478,10 @@ TIME_AGG_FREQUENCIES: dict[str, str | None] = {
 }
 
 # Aggregation functions exposed in the UI. Maps user-facing label → pandas
-# method name accepted by ``Resampler.agg``.
-TIME_AGG_FUNCTIONS: dict[str, str] = {
+# method name accepted by ``Resampler.agg``. "None" means *do not aggregate*
+# — plot every raw row regardless of the chosen interval.
+TIME_AGG_FUNCTIONS: dict[str, str | None] = {
+    "None":               None,
     "Average":            "mean",
     "Sum":                "sum",
     "Count":              "count",
@@ -282,7 +494,7 @@ def _aggregate_time_series(
     date_col: str,
     value_cols: list[str],
     freq: str | None,
-    agg_func: str = "mean",
+    agg_func: str | None = "mean",
 ) -> pd.DataFrame:
     work = df[[date_col, *value_cols]].copy()
     work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
@@ -290,7 +502,10 @@ def _aggregate_time_series(
         work[col] = pd.to_numeric(work[col], errors="coerce")
     work = work.dropna(subset=[date_col]).sort_values(date_col)
 
-    if freq:
+    # Both ``freq`` and ``agg_func`` must be set to actually resample.
+    # Picking "None" in either dropdown short-circuits to raw rows so the
+    # user can see every reading.
+    if freq and agg_func:
         work = (
             work.set_index(date_col)
             .resample(freq)[value_cols]
@@ -335,6 +550,9 @@ def multi_line_time_series(
     value_cols: list[str],
     aggregation: str = "None",
     agg_func: str = "Average",
+    start_dt: pd.Timestamp | None = None,
+    end_dt: pd.Timestamp | None = None,
+    precision: int | None = None,
 ) -> go.Figure | None:
     """Interactive multi-line time series with optional dual y-axis.
 
@@ -344,6 +562,10 @@ def multi_line_time_series(
     applied inside each bucket (Average / Sum / Count / Standard Deviation).
     This is *aggregation*, not random sampling, and is fully user-controlled.
     With ``aggregation="None"`` every raw row is plotted.
+
+    ``start_dt`` / ``end_dt`` clip the plot to a specific operational window
+    (e.g. zoom into a single shift). They run BEFORE aggregation so the
+    aggregation buckets reflect the filtered range only.
     """
     if not value_cols:
         return None
@@ -351,7 +573,22 @@ def multi_line_time_series(
     freq = TIME_AGG_FREQUENCIES.get(aggregation)
     fn = TIME_AGG_FUNCTIONS.get(agg_func, "mean")
 
-    work = _aggregate_time_series(df, date_col, value_cols, freq, agg_func=fn)
+    # Range filter must happen before aggregation; copy + parse so it works
+    # whether the caller's date_col is already datetime or still a string.
+    df_in = df
+    if start_dt is not None or end_dt is not None:
+        df_in = df.copy()
+        parsed_dt = pd.to_datetime(df_in[date_col], errors="coerce")
+        mask = pd.Series(True, index=df_in.index)
+        if start_dt is not None:
+            mask &= parsed_dt >= pd.Timestamp(start_dt)
+        if end_dt is not None:
+            mask &= parsed_dt <= pd.Timestamp(end_dt)
+        df_in = df_in.loc[mask]
+        if df_in.empty:
+            return None
+
+    work = _aggregate_time_series(df_in, date_col, value_cols, freq, agg_func=fn)
     if work.empty:
         return None
 
@@ -418,4 +655,12 @@ def multi_line_time_series(
             ]
         ),
     )
+    if precision is not None:
+        p = max(0, int(precision))
+        fig.update_yaxes(tickformat=f".{p}f")
+        if secondary:
+            fig.update_layout(yaxis2=dict(
+                **(layout.get("yaxis2") or {}),
+                tickformat=f".{p}f",
+            ))
     return fig

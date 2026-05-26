@@ -29,7 +29,7 @@ from modules import (
     time_series as ts_mod,
     type_detection,
 )
-from utils.helpers import human_bytes, split_columns
+from utils.helpers import fmt_num, get_decimal_precision, human_bytes, split_columns
 
 
 st.set_page_config(
@@ -138,6 +138,60 @@ uploaded_files = st.sidebar.file_uploader(
     ),
 )
 
+# Header / row-drop overrides. Industrial sensor exports often start with
+# metadata, machine info or blank rows before the real header — give the
+# user a way to fix that without re-uploading.
+with st.sidebar.expander("📋 Header & rows", expanded=False):
+    st.caption(
+        "Skip metadata or blank rows at the top of the file, and optionally "
+        "promote the first remaining row to the header."
+    )
+    drop_top_n = st.number_input(
+        "Drop first N rows",
+        min_value=0, max_value=10_000, value=0, step=1,
+        key="hdr_drop_top_n",
+        help=(
+            "Number of leading rows to remove BEFORE any analysis runs. "
+            "Useful when the file starts with machine metadata or blank "
+            "spacer rows."
+        ),
+    )
+    promote_header_row = st.checkbox(
+        "Use first remaining row as the header",
+        value=False,
+        key="hdr_promote_row",
+        help=(
+            "After the drop above, take the next row and turn its values "
+            "into the column names. Combine with **Drop first N rows** "
+            "to handle files where the real header is, say, row 3."
+        ),
+    )
+
+# Display precision — affects how numbers render across statistics,
+# tables, correlations, metric cards, time-series axes, and the report.
+# Stored values are never rounded; this only changes display formatting.
+with st.sidebar.expander("🔢 Display precision", expanded=False):
+    st.caption(
+        "Choose how many decimal places appear in statistics, tables, "
+        "reports, correlations, and metric cards. Raw data is never "
+        "modified."
+    )
+    _PRECISION_PRESETS = ["0", "1", "2", "3", "4", "Custom"]
+    preset = st.selectbox(
+        "Decimal precision",
+        _PRECISION_PRESETS,
+        index=2,
+        key="decimal_precision_preset",
+    )
+    if preset == "Custom":
+        st.session_state["decimal_precision"] = int(st.number_input(
+            "Custom decimals",
+            min_value=0, max_value=10, value=2, step=1,
+            key="decimal_precision_custom",
+        ))
+    else:
+        st.session_state["decimal_precision"] = int(preset)
+
 # Preview-row count is a fixed product decision (10 rows is the SaaS
 # convention — enough to spot patterns, short enough to fit on one
 # screen). Automatic type conversion is always on so dirty industrial
@@ -145,6 +199,7 @@ uploaded_files = st.sidebar.file_uploader(
 # the user needing to opt in.
 preview_rows = 10
 auto_convert = True
+precision = get_decimal_precision()
 
 
 # ---------- Main ----------
@@ -194,6 +249,32 @@ if raw_df is None or raw_df.empty:
             "Uploaded file(s) loaded successfully but contain no rows."
         )
     st.stop()
+
+# Apply header / row-drop overrides from the sidebar before anything
+# downstream consumes the frame. Doing this here means smart conversion,
+# preprocessing, filters, and every tab see the corrected dataset
+# automatically. Sanitization metadata is preserved when nothing changes.
+if int(drop_top_n) > 0 or promote_header_row:
+    raw_df = data_loader.apply_header_overrides(
+        raw_df,
+        drop_first_n=int(drop_top_n),
+        promote_row_to_header=bool(promote_header_row),
+    )
+    if raw_df is None or raw_df.empty:
+        st.error(
+            "Header / row-drop settings removed every row. Lower the "
+            "**Drop first N rows** value in the sidebar to recover."
+        )
+        st.stop()
+    _bits = []
+    if int(drop_top_n) > 0:
+        _bits.append(f"dropped **{int(drop_top_n)}** leading row(s)")
+    if promote_header_row:
+        _bits.append("promoted the next row to the header")
+    st.info(
+        "📋 Header override: " + " and ".join(_bits)
+        + f". Working with {len(raw_df):,} row(s) × {raw_df.shape[1]} column(s)."
+    )
 
 # Display name for the upload batch — used in titles, export filenames,
 # and the HTML report header.
@@ -282,18 +363,18 @@ if _san_changes > 0:
     bits = []
     if sanitization_report.get("tokens_replaced_total"):
         bits.append(
-            f"replaced **{sanitization_report['tokens_replaced_total']:,}** "
-            "dirty token(s) (e.g. *No Data*, *Bad*, *Sensor Fail*) with NaN"
+            f"cleaned **{sanitization_report['tokens_replaced_total']:,}** "
+            "bad value(s) (e.g. *No Data*, *Bad*, *Sensor Fail*)"
         )
     if sanitization_report.get("numeric_conversions"):
         bits.append(
-            f"recovered **{len(sanitization_report['numeric_conversions'])}** "
-            "mixed-type column(s) as numeric"
+            f"converted **{len(sanitization_report['numeric_conversions'])}** "
+            "column(s) from text to numbers"
         )
     if sanitization_report.get("datetime_conversions"):
         bits.append(
-            f"parsed **{len(sanitization_report['datetime_conversions'])}** "
-            "column(s) as datetime"
+            f"converted **{len(sanitization_report['datetime_conversions'])}** "
+            "column(s) from text to dates"
         )
     if sanitization_report.get("infinities_replaced"):
         bits.append(
@@ -302,10 +383,13 @@ if _san_changes > 0:
         )
     if sanitization_report.get("arrow_unsafe_columns"):
         bits.append(
-            f"hardened **{len(sanitization_report['arrow_unsafe_columns'])}** "
-            "column(s) for PyArrow rendering"
+            f"fixed **{len(sanitization_report['arrow_unsafe_columns'])}** "
+            "column(s) for safe display"
         )
-    st.info("🧼 Auto-sanitization: " + "; ".join(bits) + ".")
+    st.info(
+        "🧼 Auto-cleaned on load: " + "; ".join(bits)
+        + ". See the **Cleaning** tab for details."
+    )
 
 
 # ---------- Smart type detection (object → numeric) ----------
@@ -331,6 +415,60 @@ if type_detection.had_invalid_coercions(conversion_report):
         "Some values were converted to NaN during processing. "
         "Check the **Type Conversion Summary** under the Cleaning tab."
     )
+
+
+# ---------- Smart categorical / boolean-like detection on numerics ----------
+# Industrial sensor datasets often store labels as numbers (0/1, 1/2, status
+# codes). These columns are technically numeric but behave like categories —
+# treating them as continuous inflates means, drowns out correlations, and
+# clutters histograms. We surface a suggestion banner + one-click apply that
+# converts them via the existing manual-dtypes machinery, so the user keeps
+# full per-column override control through the Preprocessing UI.
+_low_unique_suggestions = type_detection.detect_low_unique_numeric(processed_df)
+_already_overridden = set(st.session_state.get("manual_dtypes", {}).keys())
+_pending_low_unique = [
+    s for s in _low_unique_suggestions if s["column"] not in _already_overridden
+]
+if _pending_low_unique:
+    _preview_names = ", ".join(
+        f"`{s['column']}` ({s['unique']} unique)"
+        for s in _pending_low_unique[:4]
+    )
+    _more = (
+        f" and {len(_pending_low_unique) - 4} more"
+        if len(_pending_low_unique) > 4 else ""
+    )
+    st.info(
+        "🏷️ Detected **{n}** numeric column(s) that look categorical "
+        "(e.g. machine status, alarm state, ON/OFF, pass/fail): "
+        "{names}{more}. Convert them to **category** so they're treated "
+        "as labels in stats / filters / visualizations.".format(
+            n=len(_pending_low_unique),
+            names=_preview_names,
+            more=_more,
+        )
+    )
+    _bcol1, _bcol2 = st.columns([1, 5])
+    with _bcol1:
+        if st.button(
+            "Convert all to category",
+            key="apply_low_unique_cat",
+            use_container_width=True,
+        ):
+            st.session_state.setdefault("manual_dtypes", {})
+            for s in _pending_low_unique:
+                st.session_state["manual_dtypes"][s["column"]] = "category"
+            st.success(
+                f"Marked {len(_pending_low_unique)} column(s) as `category`. "
+                "Open **⚙️ Preprocessing → Data Types** to customise."
+            )
+            st.rerun()
+    with _bcol2:
+        st.caption(
+            "Prefer manual control? Open **⚙️ Preprocessing → Data Types** "
+            "and convert columns individually (you can also pick **boolean** "
+            "for true 0/1 flags)."
+        )
 
 
 # ---------- User-driven preprocessing (drop columns, change dtypes) ----------
@@ -363,7 +501,7 @@ with st.spinner("Computing summary statistics…"):
     missing = data_cleaning.missing_value_summary(df)
     dup_summary = data_cleaning.duplicate_summary(df)
     outliers = data_cleaning.detect_outliers_iqr(df)
-    numeric_stats = eda_analysis.numeric_statistics(df)
+    numeric_stats = eda_analysis.numeric_statistics(df, precision=precision)
     categorical_stats = eda_analysis.categorical_statistics(df)
     numeric_cols, categorical_cols, _ = split_columns(df)
 
@@ -450,92 +588,87 @@ with tabs[0]:
 
 # ---------- Cleaning ----------
 with tabs[1]:
-    st.subheader("Data Preprocessing Report")
+    st.subheader("Data Cleaning Summary")
     st.caption(
-        "Production sanitization layer — runs once on load. Cleans industrial "
-        "dirty tokens (*No Data*, *Bad*, *Sensor Fail*, Excel errors, ...), "
-        "recovers mixed-type columns, and guarantees PyArrow-safe rendering."
+        "When your file was loaded, we automatically cleaned it: removed "
+        "bad entries (like *No Data*, *Bad*, *Sensor Fail*, blanks), turned "
+        "text that looked like numbers into numbers, and text that looked "
+        "like dates into dates."
     )
     if not sanitization_report:
-        st.caption("No sanitization metadata attached to this dataset.")
+        st.caption("No cleaning details available for this dataset.")
     elif _san_changes == 0:
-        st.success("Dataset was already clean — no industrial tokens or "
-                   "mixed-type columns detected.")
+        st.success("Your dataset was already clean — nothing needed fixing.")
     else:
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.metric(
-            "Tokens → NaN",
+            "Bad values cleaned",
             f"{sanitization_report.get('tokens_replaced_total', 0):,}",
+            help="Entries like 'No Data', 'Bad', 'Sensor Fail', '-' were "
+                 "replaced with empty so they don't break your stats.",
         )
         sc2.metric(
-            "Numeric recovered",
+            "Text → Numbers",
             len(sanitization_report.get("numeric_conversions", [])),
+            help="Columns that were stored as text but actually contain "
+                 "numbers — converted so you can do math on them.",
         )
         sc3.metric(
-            "Datetime recovered",
+            "Text → Dates",
             len(sanitization_report.get("datetime_conversions", [])),
+            help="Columns that were stored as text but actually contain "
+                 "dates — converted so time-series charts work.",
         )
         sc4.metric(
-            "Arrow-hardened",
+            "Display fixes",
             len(sanitization_report.get("arrow_unsafe_columns", [])),
+            help="Columns with mixed value types that would not display "
+                 "correctly — adjusted so tables render safely.",
         )
 
-        tok_per_col = sanitization_report.get("tokens_replaced_per_column", {})
-        if tok_per_col:
-            with st.expander(
-                f"Dirty tokens replaced — {len(tok_per_col)} column(s)",
-                expanded=False,
-            ):
+        with st.expander("Show cleaning details", expanded=False):
+            tok_per_col = sanitization_report.get("tokens_replaced_per_column", {})
+            if tok_per_col:
+                st.markdown(f"**Bad values cleaned — {len(tok_per_col)} column(s)**")
                 tok_df = pd.DataFrame(
-                    [{"Column": c, "Tokens → NaN": n}
+                    [{"Column": c, "Bad values cleaned": n}
                      for c, n in sorted(tok_per_col.items(),
                                         key=lambda kv: -kv[1])]
                 )
                 st.dataframe(tok_df, width="stretch", hide_index=True)
 
-        num_log = sanitization_report.get("numeric_conversions", [])
-        if num_log:
-            with st.expander(
-                f"Mixed-type → numeric — {len(num_log)} column(s)",
-                expanded=False,
-            ):
+            num_log = sanitization_report.get("numeric_conversions", [])
+            if num_log:
+                st.markdown(f"**Text → Numbers — {len(num_log)} column(s)**")
                 st.dataframe(
                     pd.DataFrame(num_log),
                     width="stretch", hide_index=True,
                 )
 
-        dt_log = sanitization_report.get("datetime_conversions", [])
-        if dt_log:
-            with st.expander(
-                f"Detected datetime columns — {len(dt_log)} column(s)",
-                expanded=False,
-            ):
+            dt_log = sanitization_report.get("datetime_conversions", [])
+            if dt_log:
+                st.markdown(f"**Text → Dates — {len(dt_log)} column(s)**")
                 st.dataframe(
                     pd.DataFrame(dt_log),
                     width="stretch", hide_index=True,
                 )
 
-        arrow_log = sanitization_report.get("arrow_unsafe_columns", [])
-        if arrow_log:
-            with st.expander(
-                f"PyArrow-hardened columns — {len(arrow_log)} column(s)",
-                expanded=False,
-            ):
+            arrow_log = sanitization_report.get("arrow_unsafe_columns", [])
+            if arrow_log:
+                st.markdown(f"**Display fixes — {len(arrow_log)} column(s)**")
                 st.caption(
-                    "These columns had mixed Python types that would crash "
-                    "Streamlit's PyArrow renderer. They were stringified so "
-                    "they display safely."
+                    "These columns mixed different value types (e.g. numbers "
+                    "and text together). They were converted to text so the "
+                    "table displays correctly."
                 )
                 st.dataframe(
                     pd.DataFrame(arrow_log),
                     width="stretch", hide_index=True,
                 )
 
-        errors = sanitization_report.get("errors", [])
-        if errors:
-            with st.expander(
-                f"Sanitization warnings — {len(errors)}", expanded=False,
-            ):
+            errors = sanitization_report.get("errors", [])
+            if errors:
+                st.markdown(f"**Warnings — {len(errors)}**")
                 for msg in errors:
                     st.markdown(f"- {msg}")
 
@@ -646,7 +779,17 @@ with tabs[2]:
     if numeric_stats.empty:
         st.info("No numeric columns detected.")
     else:
-        st.dataframe(numeric_stats, width="stretch", hide_index=True)
+        _stat_float_cols = [
+            c for c in ["Missing %", "Mean", "Std", "Min",
+                        "25%", "50%", "75%", "Max", "Skew", "Kurtosis"]
+            if c in numeric_stats.columns
+        ]
+        st.dataframe(
+            numeric_stats.style.format(
+                f"{{:.{precision}f}}", subset=_stat_float_cols, na_rep="—",
+            ),
+            width="stretch", hide_index=True,
+        )
 
     st.subheader("Categorical Columns")
     if not categorical_stats:
@@ -666,7 +809,9 @@ with tabs[2]:
         key="stats_drill_col",
     )
     if drill_col != "(select)":
-        detail_df = eda_analysis.column_detail_stats(df, drill_col)
+        detail_df = eda_analysis.column_detail_stats(
+            df, drill_col, precision=precision,
+        )
         if detail_df.empty:
             st.info("No detail available for the selected column.")
         else:
@@ -838,7 +983,7 @@ with tabs[3]:
                 st.session_state["_viz_corr_built"] = True
             if st.session_state.get("_viz_corr_built"):
                 with st.spinner("Computing correlations…"):
-                    fig = iviz.correlation_heatmap(df)
+                    fig = iviz.correlation_heatmap(df, precision=precision)
                 if fig is None:
                     st.info("Need at least 2 numeric columns for a correlation heatmap.")
                 else:
@@ -858,6 +1003,23 @@ with tabs[3]:
             else:
                 viz_freq_labels = list(iviz.TIME_AGG_FREQUENCIES.keys())
                 viz_agg_func_labels = list(iviz.TIME_AGG_FUNCTIONS.keys())
+                # Compute defaults for the calendar pickers from the first
+                # detected datetime column so the widgets land on actual
+                # data — without these bounds the date_input defaults to
+                # *today*, which is almost never what an industrial user
+                # wants.
+                _ml_default_col = datetime_cols_viz[0]
+                _ml_parsed_dt = pd.to_datetime(
+                    df[_ml_default_col], errors="coerce",
+                ).dropna()
+                if _ml_parsed_dt.empty:
+                    _ml_min_ts = pd.Timestamp.now().normalize()
+                    _ml_max_ts = _ml_min_ts + pd.Timedelta(hours=1)
+                else:
+                    _ml_min_ts = _ml_parsed_dt.min()
+                    _ml_max_ts = _ml_parsed_dt.max()
+                _ml_min_pd = _ml_min_ts.to_pydatetime()
+                _ml_max_pd = _ml_max_ts.to_pydatetime()
                 with st.form("viz_ml_form", clear_on_submit=False, border=False):
                     c1, c2 = st.columns([1, 2])
                     with c1:
@@ -900,6 +1062,49 @@ with tabs[3]:
                                 "bucket (only used when an interval is set)."
                             ),
                         )
+                    # Optional datetime range filter — lets the user zoom
+                    # into a specific operational window (e.g. one shift).
+                    # Defaults track the selected column's actual span so
+                    # the calendars open on real data, not today's date.
+                    st.markdown("**Time range filter (optional)**")
+                    st.checkbox(
+                        "Apply time range filter",
+                        value=False,
+                        key="ml_time_filter_on",
+                        help=(
+                            "When enabled, only data between the start "
+                            "and end datetime below is plotted."
+                        ),
+                    )
+                    tr1, tr2 = st.columns(2)
+                    with tr1:
+                        st.markdown("**Start**")
+                        st.date_input(
+                            "Start date",
+                            value=_ml_min_pd.date(),
+                            key="ml_start_date",
+                            help="Inclusive lower bound (date).",
+                        )
+                        st.time_input(
+                            "Start time",
+                            value=_ml_min_pd.time(),
+                            key="ml_start_time",
+                            step=60,
+                        )
+                    with tr2:
+                        st.markdown("**End**")
+                        st.date_input(
+                            "End date",
+                            value=_ml_max_pd.date(),
+                            key="ml_end_date",
+                            help="Inclusive upper bound (date).",
+                        )
+                        st.time_input(
+                            "End time",
+                            value=_ml_max_pd.time(),
+                            key="ml_end_time",
+                            step=60,
+                        )
                     built = st.form_submit_button(
                         "📊 Build time-series chart",                        use_container_width=True,
                     )
@@ -909,13 +1114,48 @@ with tabs[3]:
                         tuple(st.session_state["ml_values"]),
                         st.session_state["ml_agg"],
                         st.session_state["ml_agg_func"],
+                        bool(st.session_state.get("ml_time_filter_on", False)),
+                        st.session_state.get("ml_start_date"),
+                        st.session_state.get("ml_start_time"),
+                        st.session_state.get("ml_end_date"),
+                        st.session_state.get("ml_end_time"),
                     )
                 cfg = st.session_state.get("_viz_ml_cfg")
                 if cfg:
-                    ml_date, ml_values, ml_agg, ml_agg_func = cfg
+                    # Tolerate older cached configs from before the
+                    # calendar widgets existed.
+                    if len(cfg) == 9:
+                        (ml_date, ml_values, ml_agg, ml_agg_func,
+                         ml_filter_on, ml_sd, ml_st_, ml_ed, ml_et) = cfg
+                    else:
+                        ml_date, ml_values, ml_agg, ml_agg_func = cfg[:4]
+                        ml_filter_on = False
+                        ml_sd = ml_st_ = ml_ed = ml_et = None
                     ml_values = list(ml_values)
+                    start_ts = end_ts = None
+                    if ml_filter_on and ml_sd is not None and ml_st_ is not None:
+                        start_ts = pd.Timestamp.combine(ml_sd, ml_st_)
+                    if ml_filter_on and ml_ed is not None and ml_et is not None:
+                        end_ts = pd.Timestamp.combine(ml_ed, ml_et)
+                    if start_ts is not None and end_ts is not None and start_ts > end_ts:
+                        st.error(
+                            "**Start datetime** is after **End datetime** — "
+                            "time range filter skipped."
+                        )
+                        start_ts = None
+                        end_ts = None
                     if not ml_values:
                         st.info("Select at least one numeric column and rebuild.")
+                    elif ml_date not in df.columns or any(
+                        c not in df.columns for c in ml_values
+                    ):
+                        _missing = [ml_date] if ml_date not in df.columns else []
+                        _missing += [c for c in ml_values if c not in df.columns]
+                        st.info(
+                            "Selected column(s) no longer exist in the "
+                            f"dataset ({', '.join(f'`{c}`' for c in _missing)}) — "
+                            "reconfigure and click **Build time-series chart** again."
+                        )
                     else:
                         fig = iviz.multi_line_time_series(
                             df,
@@ -923,13 +1163,29 @@ with tabs[3]:
                             value_cols=ml_values,
                             aggregation=ml_agg,
                             agg_func=ml_agg_func,
+                            start_dt=start_ts,
+                            end_dt=end_ts,
+                            precision=precision,
                         )
                         if fig is None:
                             st.warning(
-                                "No rows left after parsing the date column. "
-                                "Check that it contains valid dates."
+                                "No rows left after parsing the date column "
+                                "and applying the time range filter. Check "
+                                "the dates and bounds and rebuild."
                             )
                         else:
+                            if start_ts is not None or end_ts is not None:
+                                _from = (
+                                    start_ts.strftime("%Y-%m-%d %H:%M")
+                                    if start_ts is not None else "start"
+                                )
+                                _to = (
+                                    end_ts.strftime("%Y-%m-%d %H:%M")
+                                    if end_ts is not None else "end"
+                                )
+                                st.caption(
+                                    f"Time range filter active: **{_from}** → **{_to}**."
+                                )
                             st.plotly_chart(fig, width="stretch")
                 else:
                     st.info("Configure the chart above and click **Build time-series chart**.")
@@ -951,7 +1207,11 @@ with tabs[4]:
     )
 
     datetime_cols = ts_mod.detect_datetime_columns(df)
-    ts_value_candidates = df.select_dtypes(include=["number"]).columns.tolist()
+    ts_value_candidates = [
+        c for c in df.columns
+        if pd.api.types.is_numeric_dtype(df[c])
+        and not pd.api.types.is_bool_dtype(df[c])
+    ]
 
     if not datetime_cols:
         st.info(
@@ -1115,7 +1375,9 @@ with tabs[5]:
         )
 
         # ---- Target summary cards ----
-        tgt_summary = target_analysis.target_summary(df, target)
+        tgt_summary = target_analysis.target_summary(
+            df, target, precision=precision,
+        )
         if tgt_summary:
             tc1, tc2, tc3, tc4, tc5 = st.columns(5)
             tc1.metric("Total values", f"{tgt_summary['total']:,}")
@@ -1124,9 +1386,9 @@ with tabs[5]:
                 f"{tgt_summary['missing']:,} ({tgt_summary['missing_pct']:.2f}%)",
             )
             if numeric_target and tgt_summary.get("mean") is not None:
-                tc3.metric("Mean",   f"{tgt_summary['mean']:.2f}")
-                tc4.metric("Median", f"{tgt_summary['median']:.2f}")
-                tc5.metric("Std",    f"{tgt_summary['std']:.2f}")
+                tc3.metric("Mean",   fmt_num(tgt_summary['mean'], precision))
+                tc4.metric("Median", fmt_num(tgt_summary['median'], precision))
+                tc5.metric("Std",    fmt_num(tgt_summary['std'], precision))
             else:
                 tc3.metric("Unique classes", f"{tgt_summary['unique']:,}")
                 tc4.metric(
@@ -1136,7 +1398,7 @@ with tabs[5]:
                 tc5.metric(
                     "Top frequency",
                     f"{tgt_summary.get('top_freq', 0):,}",
-                    f"{tgt_summary.get('top_pct', 0):.2f}%",
+                    f"{tgt_summary.get('top_pct', 0):.{precision}f}%",
                 )
             with st.expander("Full target statistics", expanded=False):
                 st.dataframe(
@@ -1150,15 +1412,19 @@ with tabs[5]:
                     )
 
         if numeric_target:
-            corr_df = target_analysis.correlations_with_target(df, target)
+            corr_df = target_analysis.correlations_with_target(
+                df, target, precision=max(precision, 4),
+            )
             if not corr_df.empty:
                 st.markdown("### Correlation with target")
+
+                _corr_p = max(precision, 4)
 
                 def _fmt_corr(v):
                     if pd.isna(v):
                         return ""
                     arrow = "▲" if v >= 0 else "▼"
-                    return f"{arrow} {v:+.4f}"
+                    return f"{arrow} {v:+.{_corr_p}f}"
 
                 def _color_corr(v):
                     if pd.isna(v):
@@ -1179,7 +1445,7 @@ with tabs[5]:
                 strongest = corr_df.iloc[0]
                 st.markdown(
                     f"Most influential feature: **{strongest['Feature']}** "
-                    f"(r = {strongest['Correlation']:+.3f} — "
+                    f"(r = {strongest['Correlation']:+.{_corr_p}f} — "
                     f"{strongest['Strength'].lower()} {strongest['Direction']})."
                 )
             else:
@@ -1381,6 +1647,259 @@ with tabs[5]:
                             "Click **Plot grouped boxes** to render the charts."
                         )
 
+        # --- Outlier detection plot (works for both target regimes) ----
+        # An interactive Plotly scatter that paints outliers in red and
+        # draws the IQR / Z-score bounds. Lets the user pick which
+        # numeric column to inspect (defaults to the target when it's
+        # numeric) and optionally a datetime X axis so outliers can be
+        # placed in operational time.
+        st.markdown("### Outlier detection plot")
+        st.caption(
+            "Highlights outliers in a numeric column with a distinct "
+            "colour and marker. Useful for spotting sensor drift, bad "
+            "reads, or extreme operational events. The IQR rule is "
+            "robust to skew (good default for sensor data); the Z-score "
+            "rule assumes roughly normal data."
+        )
+        _outlier_num_options = [
+            c for c in df.columns
+            if pd.api.types.is_numeric_dtype(df[c])
+            and not pd.api.types.is_bool_dtype(df[c])
+        ]
+        if not _outlier_num_options:
+            st.info(
+                "No numeric columns available — outlier detection needs "
+                "at least one numeric column."
+            )
+        else:
+            _outlier_dt_cols = ts_mod.detect_datetime_columns(df)
+            _outlier_x_choices = ["(row index)"] + _outlier_dt_cols + [
+                c for c in _outlier_num_options if c not in _outlier_dt_cols
+            ]
+            _outlier_color_choices = ["(none)"] + [
+                c for c in categorical_cols if c in df.columns
+            ]
+            # Default to the target itself when it's numeric — that's
+            # what the user almost always wants to inspect first.
+            _outlier_default_col = (
+                target if numeric_target and target in _outlier_num_options
+                else _outlier_num_options[0]
+            )
+            # When a datetime column is available, default the X axis to
+            # the first one so outliers land in operational time without
+            # the user having to change the dropdown.
+            _outlier_x_default = (
+                _outlier_dt_cols[0] if _outlier_dt_cols else "(row index)"
+            )
+            # Compute calendar defaults from the default datetime column
+            # so the optional time range pickers land on real data.
+            if _outlier_dt_cols:
+                _ol_parsed_dt = pd.to_datetime(
+                    df[_outlier_x_default], errors="coerce",
+                ).dropna()
+                if _ol_parsed_dt.empty:
+                    _ol_min_pd = pd.Timestamp.now().to_pydatetime()
+                    _ol_max_pd = (
+                        pd.Timestamp.now() + pd.Timedelta(hours=1)
+                    ).to_pydatetime()
+                else:
+                    _ol_min_pd = _ol_parsed_dt.min().to_pydatetime()
+                    _ol_max_pd = _ol_parsed_dt.max().to_pydatetime()
+            else:
+                _ol_min_pd = _ol_max_pd = None
+            with st.form("target_outlier_form", clear_on_submit=False, border=False):
+                oc1, oc2 = st.columns(2)
+                with oc1:
+                    st.selectbox(
+                        "Numeric column to inspect",
+                        _outlier_num_options,
+                        index=_outlier_num_options.index(_outlier_default_col),
+                        key="target_outlier_col",
+                    )
+                with oc2:
+                    st.selectbox(
+                        "X axis",
+                        _outlier_x_choices,
+                        index=_outlier_x_choices.index(_outlier_x_default),
+                        key="target_outlier_x",
+                        help=(
+                            "Pick a datetime column to place outliers "
+                            "in time, or keep row index for a raw view."
+                        ),
+                    )
+                oc3, oc4, oc5 = st.columns([2, 2, 3])
+                with oc3:
+                    st.selectbox(
+                        "Method",
+                        ["iqr", "zscore"],
+                        format_func=lambda m: "IQR" if m == "iqr" else "Z-score",
+                        key="target_outlier_method",
+                    )
+                with oc4:
+                    st.number_input(
+                        "k",
+                        min_value=0.5, max_value=5.0, value=1.5, step=0.1,
+                        key="target_outlier_k",
+                        help=(
+                            "IQR multiplier (1.5 = classic Tukey rule, "
+                            "3.0 = far-outlier rule). For Z-score, the "
+                            "|z| threshold."
+                        ),
+                    )
+                with oc5:
+                    if _outlier_color_choices != ["(none)"]:
+                        st.selectbox(
+                            "Colour normal points by",
+                            _outlier_color_choices,
+                            key="target_outlier_color",
+                            help=(
+                                "Optionally tint inlier points by a "
+                                "categorical column (e.g. machine ID, "
+                                "shift). Outliers stay red regardless."
+                            ),
+                        )
+                # Optional time range filter — only meaningful when the X
+                # axis is a datetime column. Clipping the data before
+                # outlier detection lets the user inspect one shift /
+                # campaign / outage window in isolation.
+                if _outlier_dt_cols:
+                    st.markdown("**Time range filter (optional)**")
+                    st.checkbox(
+                        "Apply time range filter",
+                        value=False,
+                        key="target_outlier_time_on",
+                        help=(
+                            "Restrict outlier detection to a specific "
+                            "operational window. Only active when the X "
+                            "axis above is a datetime column."
+                        ),
+                    )
+                    otr1, otr2 = st.columns(2)
+                    with otr1:
+                        st.markdown("**Start**")
+                        st.date_input(
+                            "Start date",
+                            value=_ol_min_pd.date(),
+                            key="target_outlier_start_date",
+                            help="Inclusive lower bound (date).",
+                        )
+                        st.time_input(
+                            "Start time",
+                            value=_ol_min_pd.time(),
+                            key="target_outlier_start_time",
+                            step=60,
+                        )
+                    with otr2:
+                        st.markdown("**End**")
+                        st.date_input(
+                            "End date",
+                            value=_ol_max_pd.date(),
+                            key="target_outlier_end_date",
+                            help="Inclusive upper bound (date).",
+                        )
+                        st.time_input(
+                            "End time",
+                            value=_ol_max_pd.time(),
+                            key="target_outlier_end_time",
+                            step=60,
+                        )
+                outlier_built = st.form_submit_button(
+                    "🔎 Detect & plot outliers",
+                    use_container_width=True,
+                )
+            if outlier_built:
+                _x_choice = st.session_state.get("target_outlier_x", "(row index)")
+                _color_choice = st.session_state.get(
+                    "target_outlier_color", "(none)"
+                )
+                _ol_filter_on = bool(
+                    st.session_state.get("target_outlier_time_on", False)
+                )
+                _ol_sd = st.session_state.get("target_outlier_start_date")
+                _ol_st = st.session_state.get("target_outlier_start_time")
+                _ol_ed = st.session_state.get("target_outlier_end_date")
+                _ol_et = st.session_state.get("target_outlier_end_time")
+                st.session_state["_target_outlier_cfg"] = (
+                    target,
+                    st.session_state["target_outlier_col"],
+                    None if _x_choice == "(row index)" else _x_choice,
+                    st.session_state["target_outlier_method"],
+                    float(st.session_state["target_outlier_k"]),
+                    None if _color_choice == "(none)" else _color_choice,
+                    _ol_filter_on,
+                    _ol_sd, _ol_st, _ol_ed, _ol_et,
+                )
+            _outlier_cfg = st.session_state.get("_target_outlier_cfg")
+            if _outlier_cfg and _outlier_cfg[0] == target:
+                # Tolerate older cached configs from before the
+                # time-range filter was added.
+                if len(_outlier_cfg) == 11:
+                    (_, _o_col, _o_x, _o_method, _o_k, _o_color,
+                     _o_filter_on, _o_sd, _o_st, _o_ed, _o_et) = _outlier_cfg
+                else:
+                    _, _o_col, _o_x, _o_method, _o_k, _o_color = _outlier_cfg[:6]
+                    _o_filter_on = False
+                    _o_sd = _o_st = _o_ed = _o_et = None
+                _o_start_ts = _o_end_ts = None
+                if _o_filter_on and _o_x is not None:
+                    if _o_sd is not None and _o_st is not None:
+                        _o_start_ts = pd.Timestamp.combine(_o_sd, _o_st)
+                    if _o_ed is not None and _o_et is not None:
+                        _o_end_ts = pd.Timestamp.combine(_o_ed, _o_et)
+                    if (
+                        _o_start_ts is not None
+                        and _o_end_ts is not None
+                        and _o_start_ts > _o_end_ts
+                    ):
+                        st.error(
+                            "**Start datetime** is after **End datetime** — "
+                            "time range filter skipped."
+                        )
+                        _o_start_ts = _o_end_ts = None
+                if _o_col not in df.columns:
+                    st.info(
+                        "Selected column no longer exists — reconfigure "
+                        "and rebuild."
+                    )
+                else:
+                    _outlier_fig = iviz.outlier_scatter(
+                        df,
+                        column=_o_col,
+                        x_col=_o_x,
+                        method=_o_method,
+                        k=_o_k,
+                        z_threshold=_o_k if _o_method == "zscore" else 3.0,
+                        color_by=_o_color,
+                        precision=precision,
+                        start_dt=_o_start_ts,
+                        end_dt=_o_end_ts,
+                    )
+                    if _outlier_fig is None:
+                        st.warning(
+                            f"Could not build outlier plot for `{_o_col}` — "
+                            "check that it has non-null numeric values and "
+                            "that any time range filter leaves rows."
+                        )
+                    else:
+                        if _o_start_ts is not None or _o_end_ts is not None:
+                            _from = (
+                                _o_start_ts.strftime("%Y-%m-%d %H:%M")
+                                if _o_start_ts is not None else "start"
+                            )
+                            _to = (
+                                _o_end_ts.strftime("%Y-%m-%d %H:%M")
+                                if _o_end_ts is not None else "end"
+                            )
+                            st.caption(
+                                f"Time range filter active: **{_from}** → **{_to}**."
+                            )
+                        st.plotly_chart(_outlier_fig, width="stretch")
+            else:
+                st.caption(
+                    "Configure the inspector above and click "
+                    "**Detect & plot outliers**."
+                )
+
         st.markdown("### Textual insights")
         for line in target_analysis.generate_target_insights(df, target):
             st.markdown(f"- {line}")
@@ -1438,6 +1957,7 @@ with tabs[7]:
                 company_name=company_name.strip() or None,
                 report_title=report_title.strip() or "Auto EDA Report",
                 logo_path=LOGO,
+                precision=precision,
             )
         st.success("Report ready.")
         st.download_button(

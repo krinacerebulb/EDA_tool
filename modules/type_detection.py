@@ -153,3 +153,100 @@ def converted_columns(report: list[dict[str, Any]]) -> list[str]:
 def had_invalid_coercions(report: list[dict[str, Any]]) -> bool:
     """True if any *converted* column lost values to NaN during coercion."""
     return any(e["convertible"] and e["invalid_count"] > 0 for e in report)
+
+
+# Common machine/process-status integer encodings. Catching these by value as
+# well as by cardinality lets us flag "status" columns even when the dataset
+# happens to contain a few more codes than the bare 0/1 case.
+_BOOLEAN_LIKE_VALUE_SETS: tuple[frozenset, ...] = (
+    frozenset({0, 1}),
+    frozenset({1, 2}),
+    frozenset({-1, 0, 1}),
+    frozenset({0, 1, 2}),
+)
+
+
+@st.cache_data(show_spinner=False)
+def detect_low_unique_numeric(
+    df: pd.DataFrame,
+    max_unique: int = 10,
+    max_unique_ratio: float = 0.01,
+) -> list[dict[str, Any]]:
+    """Find numeric columns whose values behave like categories / flags.
+
+    Industrial datasets routinely carry numeric encodings for machine
+    status, alarm state, ON/OFF, pass/fail, or binary targets. These
+    columns are technically numeric but treating them as such inflates
+    means/stdevs and drowns them out in correlation analysis. This
+    detector flags them so the UI can offer to convert them to
+    ``category``.
+
+    A column qualifies when it has at least one value and either:
+      * its unique-value count is ``<= max_unique`` AND its unique-to-row
+        ratio is ``<= max_unique_ratio`` (cheap structural test that
+        works on every cardinality), OR
+      * its unique value set is one of the canonical boolean-like
+        encodings ({0,1}, {1,2}, {-1,0,1}, {0,1,2}).
+
+    Returns a list of dicts ready to drive a Streamlit suggestion panel.
+    Already-bool columns are skipped — they don't need converting.
+    """
+    out: list[dict[str, Any]] = []
+    n = len(df)
+    if n == 0:
+        return out
+
+    for col in df.columns:
+        s = df[col]
+        if not pd.api.types.is_numeric_dtype(s):
+            continue
+        if pd.api.types.is_bool_dtype(s):
+            continue
+        non_null = s.dropna()
+        if non_null.empty:
+            continue
+
+        try:
+            unique_vals = non_null.unique()
+        except TypeError:
+            continue
+        n_unique = int(len(unique_vals))
+        if n_unique <= 1:
+            # Constant columns aren't categorical, they're degenerate; skip.
+            continue
+
+        ratio = n_unique / n
+        structural_hit = n_unique <= max_unique and ratio <= max_unique_ratio
+
+        boolean_hit = False
+        if n_unique <= 4:
+            try:
+                value_set = frozenset(
+                    int(v) for v in unique_vals
+                    if float(v).is_integer()
+                )
+                if len(value_set) == n_unique:
+                    boolean_hit = value_set in _BOOLEAN_LIKE_VALUE_SETS
+            except (TypeError, ValueError):
+                pass
+
+        if not (structural_hit or boolean_hit):
+            continue
+
+        # Build a small preview of the actual values for the suggestion UI.
+        examples = (
+            non_null.astype(str)
+            .value_counts()
+            .head(min(6, n_unique))
+            .index
+            .tolist()
+        )
+
+        out.append({
+            "column": col,
+            "unique": n_unique,
+            "unique_ratio": round(ratio, 4),
+            "examples": examples,
+            "boolean_like": boolean_hit,
+        })
+    return out

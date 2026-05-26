@@ -154,11 +154,11 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 # ----- helpers --------------------------------------------------------------
 
 
-def _fmt_cell(v) -> str:
+def _fmt_cell(v, precision: int = 2) -> str:
     """Pretty-print a single value for a report table cell.
 
     - integers get thousand separators
-    - floats always render with two decimals (1548.2 → 1548.20, 25.6789 → 25.68)
+    - floats render with ``precision`` decimals (default 2 for back-compat)
     - NaN / NaT show as an em dash so empty cells read cleanly
     """
     if pd.isna(v):
@@ -168,11 +168,15 @@ def _fmt_cell(v) -> str:
     if isinstance(v, (int, np.integer)):
         return f"{int(v):,}"
     if isinstance(v, (float, np.floating)):
-        return f"{v:,.2f}"
+        return f"{v:,.{int(precision)}f}"
     return escape(str(v))
 
 
-def _df_to_html(df: pd.DataFrame, numeric_cols: list[str] | None = None) -> str:
+def _df_to_html(
+    df: pd.DataFrame,
+    numeric_cols: list[str] | None = None,
+    precision: int = 2,
+) -> str:
     """Render a DataFrame as an HTML table.
 
     Numeric-typed cells (and any column listed in ``numeric_cols``) get the
@@ -195,7 +199,7 @@ def _df_to_html(df: pd.DataFrame, numeric_cols: list[str] | None = None) -> str:
         for col in df.columns:
             v = row[col]
             cls = " class='numeric'" if col in is_numeric else ""
-            cells.append(f"<td{cls}>{_fmt_cell(v)}</td>")
+            cells.append(f"<td{cls}>{_fmt_cell(v, precision=precision)}</td>")
         rows_html_parts.append("<tr>" + "".join(cells) + "</tr>")
     return f"<table><thead><tr>{cols_html}</tr></thead><tbody>{''.join(rows_html_parts)}</tbody></table>"
 
@@ -282,7 +286,7 @@ def _time_range_section_html(df: pd.DataFrame) -> str:
     )
 
 
-def _column_health_html(df: pd.DataFrame) -> str:
+def _column_health_html(df: pd.DataFrame, precision: int = 2) -> str:
     """One-row-per-column table: dtype, completeness, uniqueness, status."""
     if df.empty:
         return _df_to_html(pd.DataFrame())
@@ -308,7 +312,7 @@ def _column_health_html(df: pd.DataFrame) -> str:
         rows.append({
             "Column": col,
             "Type": str(s.dtype),
-            "Missing": f"{missing_pct:.2f}%",
+            "Missing": f"{missing_pct:.{int(precision)}f}%",
             "Unique": f"{unique:,}",
             "Status": status,
         })
@@ -342,6 +346,7 @@ def _summary_cards_html(
     df: pd.DataFrame,
     overview: dict,
     dup_count: int,
+    precision: int = 2,
 ) -> str:
     """Four headline metrics with subtle health badges.
 
@@ -370,13 +375,13 @@ def _summary_cards_html(
         _card(
             "Missing values",
             f"{total_missing:,}",
-            f"{missing_pct:.2f}% of cells",
+            f"{missing_pct:.{int(precision)}f}% of cells",
             status=missing_status,
         ),
         _card(
             "Duplicate rows",
             f"{dup_count:,}",
-            f"{dup_pct:.2f}% of rows",
+            f"{dup_pct:.{int(precision)}f}% of rows",
             status=dup_status,
         ),
         _card("Memory", human_bytes(mem_bytes), status=mem_status),
@@ -399,7 +404,7 @@ def _profile_html(df: pd.DataFrame, overview: dict) -> str:
     )
 
 
-def _top_correlations_html(df: pd.DataFrame, top_n: int = 5) -> str:
+def _top_correlations_html(df: pd.DataFrame, top_n: int = 5, precision: int = 2) -> str:
     """Highlight the strongest numeric relationships as a small ranked table.
 
     Adds business-readable interpretation (Strong / Moderate / Weak +
@@ -438,7 +443,7 @@ def _top_correlations_html(df: pd.DataFrame, top_n: int = 5) -> str:
         rows_html.append(
             "<tr>"
             f"<td>{escape(a)} ↔ {escape(b)}</td>"
-            f"<td class='numeric'>{r:+.2f}</td>"
+            f"<td class='numeric'>{r:+.{int(precision)}f}</td>"
             f"<td><span class='badge {badge_cls}'>{label}</span> {direction}</td>"
             "</tr>"
         )
@@ -452,12 +457,12 @@ def _top_correlations_html(df: pd.DataFrame, top_n: int = 5) -> str:
     )
 
 
-def _correlation_section_html(df: pd.DataFrame) -> str:
+def _correlation_section_html(df: pd.DataFrame, precision: int = 2) -> str:
     fig = visualization.correlation_heatmap(df)
     if fig is None:
         return ""
     img = fig_to_base64(fig)
-    top_table = _top_correlations_html(df, top_n=5)
+    top_table = _top_correlations_html(df, top_n=5, precision=precision)
     return (
         "<section><h2>Correlation Heatmap</h2>"
         "<p class='lede'>How strongly numeric measures move together. "
@@ -507,6 +512,7 @@ def build_html_report(
     company_name: str | None = None,
     report_title: str = "Auto EDA Report",
     logo_path: str | Path | None = None,
+    precision: int = 2,
 ) -> str:
     """Assemble a clean executive-style HTML report.
 
@@ -531,10 +537,12 @@ def build_html_report(
             company_name=company_name,
             logo_path=logo_path,
         ),
-        summary_cards_html=_summary_cards_html(df, overview, dup_count),
+        summary_cards_html=_summary_cards_html(
+            df, overview, dup_count, precision=precision,
+        ),
         profile_html=_profile_html(df, overview),
         time_range_section=_time_range_section_html(df),
-        column_health_html=_column_health_html(df),
+        column_health_html=_column_health_html(df, precision=precision),
         numeric_html=_df_to_html(
             numeric_stats if numeric_stats is not None else pd.DataFrame(),
             numeric_cols=(
@@ -542,6 +550,7 @@ def build_html_report(
                 if numeric_stats is not None and not numeric_stats.empty
                 else []
             ),
+            precision=precision,
         ),
-        correlation_section=_correlation_section_html(df),
+        correlation_section=_correlation_section_html(df, precision=precision),
     )

@@ -31,7 +31,7 @@ def is_numeric_target(df: pd.DataFrame, target: str) -> bool:
 # --------------------------------------------------------------------- #
 
 @st.cache_data(show_spinner=False)
-def target_summary(df: pd.DataFrame, target: str) -> dict:
+def target_summary(df: pd.DataFrame, target: str, precision: int = 2) -> dict:
     """Structured stats for the selected target column.
 
     Returns a dict ready to drive Streamlit cards + a detail table. Shape
@@ -51,6 +51,7 @@ def target_summary(df: pd.DataFrame, target: str) -> dict:
     if target not in df.columns:
         return {}
 
+    p = max(0, int(precision))
     s = df[target]
     n = len(s)
     miss = int(s.isna().sum())
@@ -75,32 +76,32 @@ def target_summary(df: pd.DataFrame, target: str) -> dict:
         skew = float(non_null.skew()) if len(non_null) > 2 else float("nan")
         kurt = float(non_null.kurt()) if len(non_null) > 3 else float("nan")
         out.update({
-            "mean":     round(float(non_null.mean()), 2),
-            "median":   round(q2, 2),
-            "std":      round(float(non_null.std()), 2),
-            "min":      round(mn, 2),
-            "q25":      round(q1, 2),
-            "q75":      round(q3, 2),
-            "max":      round(mx, 2),
-            "skew":     round(skew, 2) if not np.isnan(skew) else float("nan"),
-            "kurtosis": round(kurt, 2) if not np.isnan(kurt) else float("nan"),
+            "mean":     round(float(non_null.mean()), p),
+            "median":   round(q2, p),
+            "std":      round(float(non_null.std()), p),
+            "min":      round(mn, p),
+            "q25":      round(q1, p),
+            "q75":      round(q3, p),
+            "max":      round(mx, p),
+            "skew":     round(skew, p) if not np.isnan(skew) else float("nan"),
+            "kurtosis": round(kurt, p) if not np.isnan(kurt) else float("nan"),
         })
         out["detail"] = pd.DataFrame([
             ("Count",     f"{int(non_null.count()):,}"),
             ("Missing",   f"{miss:,}"),
-            ("Missing %", f"{miss_pct:.2f}%"),
+            ("Missing %", f"{miss_pct:.{p}f}%"),
             ("Unique",    f"{unique:,}"),
-            ("Mean",      f"{out['mean']:.2f}"),
-            ("Std",       f"{out['std']:.2f}"),
-            ("Min",       f"{out['min']:.2f}"),
-            ("25%",       f"{out['q25']:.2f}"),
-            ("50%",       f"{out['median']:.2f}"),
-            ("75%",       f"{out['q75']:.2f}"),
-            ("Max",       f"{out['max']:.2f}"),
-            ("Range",     f"{(mx - mn):.2f}"),
-            ("IQR",       f"{(q3 - q1):.2f}"),
-            ("Skew",      f"{out['skew']:.2f}" if not np.isnan(out['skew']) else "—"),
-            ("Kurtosis",  f"{out['kurtosis']:.2f}" if not np.isnan(out['kurtosis']) else "—"),
+            ("Mean",      f"{out['mean']:.{p}f}"),
+            ("Std",       f"{out['std']:.{p}f}"),
+            ("Min",       f"{out['min']:.{p}f}"),
+            ("25%",       f"{out['q25']:.{p}f}"),
+            ("50%",       f"{out['median']:.{p}f}"),
+            ("75%",       f"{out['q75']:.{p}f}"),
+            ("Max",       f"{out['max']:.{p}f}"),
+            ("Range",     f"{(mx - mn):.{p}f}"),
+            ("IQR",       f"{(q3 - q1):.{p}f}"),
+            ("Skew",      f"{out['skew']:.{p}f}" if not np.isnan(out['skew']) else "—"),
+            ("Kurtosis",  f"{out['kurtosis']:.{p}f}" if not np.isnan(out['kurtosis']) else "—"),
         ], columns=["Metric", "Value"])
     elif not non_null.empty:
         counts = non_null.astype("string").value_counts()
@@ -110,29 +111,29 @@ def target_summary(df: pd.DataFrame, target: str) -> dict:
         class_dist = pd.DataFrame({
             "Class": counts.index.astype(str),
             "Count": counts.values,
-            "%":     (counts.values / len(non_null) * 100).round(2),
+            "%":     (counts.values / len(non_null) * 100).round(p),
         })
         out.update({
             "top_value":          str(top_val),
             "top_freq":           top_freq,
-            "top_pct":            round(top_pct, 2),
+            "top_pct":            round(top_pct, p),
             "class_distribution": class_dist,
         })
         out["detail"] = pd.DataFrame([
             ("Total values",  f"{n:,}"),
             ("Missing",       f"{miss:,}"),
-            ("Missing %",     f"{miss_pct:.2f}%"),
+            ("Missing %",     f"{miss_pct:.{p}f}%"),
             ("Unique classes", f"{unique:,}"),
             ("Most frequent", str(top_val)),
             ("Frequency",     f"{top_freq:,}"),
-            ("Frequency %",   f"{top_pct:.2f}%"),
+            ("Frequency %",   f"{top_pct:.{p}f}%"),
         ], columns=["Metric", "Value"])
     else:
         # All-null target — degenerate but worth representing.
         out["detail"] = pd.DataFrame([
             ("Total values", f"{n:,}"),
             ("Missing",      f"{miss:,}"),
-            ("Missing %",    f"{miss_pct:.2f}%"),
+            ("Missing %",    f"{miss_pct:.{p}f}%"),
             ("Unique",       f"{unique:,}"),
         ], columns=["Metric", "Value"])
 
@@ -144,11 +145,15 @@ def target_summary(df: pd.DataFrame, target: str) -> dict:
 # --------------------------------------------------------------------- #
 
 @st.cache_data(show_spinner=False)
-def correlations_with_target(df: pd.DataFrame, target: str) -> pd.DataFrame:
+def correlations_with_target(
+    df: pd.DataFrame, target: str, precision: int = 4,
+) -> pd.DataFrame:
     """Pearson correlation of every numeric feature with the target.
 
     Returned frame is sorted by absolute correlation (descending) and
-    includes a human-friendly strength label.
+    includes a human-friendly strength label. Correlation values are
+    rounded to ``precision`` decimals — defaulting to 4 because
+    correlations are inherently small and benefit from extra detail.
     """
     if not is_numeric_target(df, target):
         return pd.DataFrame()
@@ -157,10 +162,11 @@ def correlations_with_target(df: pd.DataFrame, target: str) -> pd.DataFrame:
     if target not in numeric.columns or numeric.shape[1] < 2:
         return pd.DataFrame()
 
+    p = max(0, int(precision))
     corr = numeric.corr(numeric_only=True)[target].drop(labels=[target])
     out = pd.DataFrame({
         "Feature": corr.index,
-        "Correlation": corr.values.round(4),
+        "Correlation": corr.values.round(p),
         "Abs": np.abs(corr.values),
     })
     out["Strength"] = out["Abs"].apply(_strength_label)

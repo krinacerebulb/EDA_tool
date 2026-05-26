@@ -20,25 +20,32 @@ def dataset_overview(df: pd.DataFrame) -> dict:
     }
 
 
-def _round2(v) -> float:
-    """Round to 2 decimals; preserves NaN for missing-value semantics."""
+def _round_to(v, precision: int = 2) -> float:
+    """Round to ``precision`` decimals; preserves NaN for missing-value semantics."""
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return float("nan")
     try:
-        return round(float(v), 2)
+        return round(float(v), int(precision))
     except (TypeError, ValueError):
         return float("nan")
 
 
+# Back-compat alias — older callers may still reference _round2.
+def _round2(v) -> float:
+    return _round_to(v, 2)
+
+
 @st.cache_data(show_spinner=False)
-def numeric_statistics(df: pd.DataFrame) -> pd.DataFrame:
+def numeric_statistics(df: pd.DataFrame, precision: int = 2) -> pd.DataFrame:
     """Full ``df.describe()``-style summary for numeric columns.
 
     Columns: ``Column, Count, Missing, Missing %, Unique, Mean, Std, Min,
-    25%, 50%, 75%, Max, Skew, Kurtosis``. All numeric values rounded to
-    two decimals for clean display. Skew / kurtosis only meaningful when
-    there are enough observations (≥3 / ≥4); otherwise NaN.
+    25%, 50%, 75%, Max, Skew, Kurtosis``. Numeric values are rounded to
+    ``precision`` decimals so the table is comfortable to read at any
+    chosen display precision. Skew / kurtosis only meaningful when there
+    are enough observations (≥3 / ≥4); otherwise NaN.
     """
+    p = max(0, int(precision))
     numeric = df.select_dtypes(include=[np.number])
     if numeric.empty:
         return pd.DataFrame()
@@ -54,7 +61,7 @@ def numeric_statistics(df: pd.DataFrame) -> pd.DataFrame:
             # All-null column — show structure but no statistics.
             rows.append({
                 "Column": col, "Count": 0, "Missing": miss,
-                "Missing %": _round2(miss_pct), "Unique": 0,
+                "Missing %": _round_to(miss_pct, p), "Unique": 0,
                 "Mean": float("nan"), "Std": float("nan"),
                 "Min": float("nan"), "25%": float("nan"),
                 "50%": float("nan"), "75%": float("nan"),
@@ -67,17 +74,17 @@ def numeric_statistics(df: pd.DataFrame) -> pd.DataFrame:
             "Column":    col,
             "Count":     int(non_null.count()),
             "Missing":   miss,
-            "Missing %": _round2(miss_pct),
+            "Missing %": _round_to(miss_pct, p),
             "Unique":    int(s.nunique(dropna=True)),
-            "Mean":      _round2(non_null.mean()),
-            "Std":       _round2(non_null.std()),
-            "Min":       _round2(non_null.min()),
-            "25%":       _round2(q.loc[0.25]),
-            "50%":       _round2(q.loc[0.50]),
-            "75%":       _round2(q.loc[0.75]),
-            "Max":       _round2(non_null.max()),
-            "Skew":      _round2(non_null.skew()) if len(non_null) > 2 else float("nan"),
-            "Kurtosis":  _round2(non_null.kurt()) if len(non_null) > 3 else float("nan"),
+            "Mean":      _round_to(non_null.mean(), p),
+            "Std":       _round_to(non_null.std(), p),
+            "Min":       _round_to(non_null.min(), p),
+            "25%":       _round_to(q.loc[0.25], p),
+            "50%":       _round_to(q.loc[0.50], p),
+            "75%":       _round_to(q.loc[0.75], p),
+            "Max":       _round_to(non_null.max(), p),
+            "Skew":      _round_to(non_null.skew(), p) if len(non_null) > 2 else float("nan"),
+            "Kurtosis":  _round_to(non_null.kurt(), p) if len(non_null) > 3 else float("nan"),
         })
     return pd.DataFrame(rows)
 
@@ -114,16 +121,20 @@ def categorical_statistics(df: pd.DataFrame, top_n: int = 5) -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def column_detail_stats(df: pd.DataFrame, col: str) -> pd.DataFrame:
+def column_detail_stats(
+    df: pd.DataFrame, col: str, precision: int = 2,
+) -> pd.DataFrame:
     """One-column drilldown — full statistical profile as a Metric/Value table.
 
     Numeric columns include describe-style quartiles, skew, kurtosis, plus
     ML-useful extras (range, IQR, zero / negative counts). Non-numeric
     columns include mode, top value, top frequency, and example values.
-    Returns an empty frame if ``col`` doesn't exist.
+    Numeric values use ``precision`` decimal places. Returns an empty
+    frame if ``col`` doesn't exist.
     """
     if col not in df.columns:
         return pd.DataFrame()
+    p = max(0, int(precision))
     s = df[col]
     n = len(s)
     miss = int(s.isna().sum())
@@ -135,7 +146,7 @@ def column_detail_stats(df: pd.DataFrame, col: str) -> pd.DataFrame:
         ("Dtype",         str(s.dtype)),
         ("Total values",  f"{n:,}"),
         ("Missing",       f"{miss:,}"),
-        ("Missing %",     f"{miss_pct:.2f}%"),
+        ("Missing %",     f"{miss_pct:.{p}f}%"),
         ("Unique values", f"{unique:,}"),
     ]
 
@@ -147,17 +158,17 @@ def column_detail_stats(df: pd.DataFrame, col: str) -> pd.DataFrame:
         )
         mn, mx = float(non_null.min()), float(non_null.max())
         rows += [
-            ("Mean",     f"{non_null.mean():.2f}"),
-            ("Median",   f"{q2:.2f}"),
-            ("Std",      f"{non_null.std():.2f}"),
-            ("Min",      f"{mn:.2f}"),
-            ("25%",      f"{q1:.2f}"),
-            ("75%",      f"{q3:.2f}"),
-            ("Max",      f"{mx:.2f}"),
-            ("Range",    f"{(mx - mn):.2f}"),
-            ("IQR",      f"{(q3 - q1):.2f}"),
-            ("Skew",     f"{non_null.skew():.2f}" if len(non_null) > 2 else "—"),
-            ("Kurtosis", f"{non_null.kurt():.2f}" if len(non_null) > 3 else "—"),
+            ("Mean",     f"{non_null.mean():.{p}f}"),
+            ("Median",   f"{q2:.{p}f}"),
+            ("Std",      f"{non_null.std():.{p}f}"),
+            ("Min",      f"{mn:.{p}f}"),
+            ("25%",      f"{q1:.{p}f}"),
+            ("75%",      f"{q3:.{p}f}"),
+            ("Max",      f"{mx:.{p}f}"),
+            ("Range",    f"{(mx - mn):.{p}f}"),
+            ("IQR",      f"{(q3 - q1):.{p}f}"),
+            ("Skew",     f"{non_null.skew():.{p}f}" if len(non_null) > 2 else "—"),
+            ("Kurtosis", f"{non_null.kurt():.{p}f}" if len(non_null) > 3 else "—"),
             ("Zeros",    f"{int((non_null == 0).sum()):,}"),
             ("Negatives", f"{int((non_null < 0).sum()):,}"),
         ]

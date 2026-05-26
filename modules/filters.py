@@ -83,10 +83,21 @@ def render_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
             st.info("Dataset is empty — no filters to apply.")
             return df, _summary(df, df, [])
 
-        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-        categorical_cols = df.select_dtypes(
-            include=["object", "category", "bool"]
-        ).columns.tolist()
+        # Use per-column dtype probes instead of ``select_dtypes`` here —
+        # ``select_dtypes`` copies the matching block, which on a wide
+        # industrial dataset (e.g. 285k rows × 12 numeric columns) can
+        # blow past available RAM just to enumerate column names.
+        numeric_cols = [
+            c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])
+        ]
+        categorical_cols = [
+            c for c in df.columns
+            if (
+                pd.api.types.is_object_dtype(df[c])
+                or isinstance(df[c].dtype, pd.CategoricalDtype)
+                or pd.api.types.is_bool_dtype(df[c])
+            )
+        ]
         eligible_cats = [
             c for c in categorical_cols
             if df[c].nunique(dropna=True) <= _MAX_CATEGORICAL_UNIQUE
