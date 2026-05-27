@@ -40,6 +40,25 @@ PUBLIC API
         can group / filter by origin.
 
 ================================================================================
+TWO MERGE STRATEGIES — auto-selected per upload batch
+================================================================================
+* **Stack mode** (current default). All files share the same column set →
+  vertical concatenation (rows from each file appended). This is what
+  industrial users expect for monthly partitions or per-site exports.
+
+* **Time-align mode** (new). Files disagree on column membership AND every
+  file has a detectable datetime column → use the densest file as the
+  *anchor* and merge sparser files onto it with ``pd.merge_asof(direction=
+  "backward")``. This implements **forward-fill until the next reading**:
+  a 6-hourly lab measurement holds for every 1-minute sensor row until the
+  next lab measurement arrives. The classic industrial use case is mixing
+  high-frequency sensor data with shift-based lab assays.
+
+  If schemas differ but some file has no datetime column, we fall back to
+  stack mode and emit a warning — alignment is impossible without a shared
+  time axis.
+
+================================================================================
 DESIGN NOTES
 ================================================================================
 * Per-file sanitization is delegated to ``data_loader._read_bytes`` (which
@@ -148,34 +167,64 @@ def load_multiple_files(uploaded_files) -> tuple[pd.DataFrame, dict[str, Any]]:
     report["schema_alignment"] = validation["alignment"]
     report["dtype_clashes"] = validation["dtype_clashes"]
 
-    # --- Pass 3: align columns. ---
-    try:
-        aligned = normalize_column_structure(frames)
-    except Exception as exc:
-        # Should not happen in practice — column-set arithmetic is bulletproof.
-        logger.exception("normalize_column_structure failed")
-        report["schema_warnings"].append(f"Column alignment failed: {exc}")
-        aligned = frames  # fall back to raw frames
+    # --- Pass 3: pick a merge strategy. ---
+    # If schemas match → stack rows (current behaviour). If schemas differ
+    # AND every file has a datetime column → switch to time-align mode so
+    # the user gets a wide, time-indexed frame with forward-filled sparse
+    # readings. See module docstring for the full contract.
+    strategy, time_cols = _decide_merge_strategy(frames)
+    report["merge_strategy"] = strategy
 
-    # --- Pass 4: concatenate. ---
-    # ``source_file`` is only useful when ≥ 2 files were merged. On a
-    # single-file upload every row would have the same value, which is
-    # redundant noise — so we omit it.
-    add_source = len(frames) > 1
-    try:
-        merged = merge_uploaded_files(aligned, add_source=add_source)
-    except Exception as exc:
-        logger.exception("merge_uploaded_files failed")
-        report["schema_warnings"].append(
-            f"Final concat failed ({exc}); returning the first file only."
-        )
-        # Last-resort: return the first frame so the app doesn't crash.
-        merged = next(iter(aligned.values())).copy()
-        if add_source:
-            merged.insert(
-                0, "source_file",
-                pd.Categorical([next(iter(aligned.keys()))] * len(merged)),
+    if strategy == "time_align":
+        try:
+            merged = _time_align_merge(frames, time_cols)
+            time_col_summary = ", ".join(
+                f"`{n}` → `{tc}`" for n, tc in time_cols.items()
             )
+            report["schema_warnings"].append(
+                "Schemas differ across files — switched to **time-align "
+                "mode**. Used the densest file as the anchor and "
+                "forward-filled sparser values until each next reading. "
+                f"Datetime columns used: {time_col_summary}."
+            )
+            report["time_align_keys"] = dict(time_cols)
+        except Exception as exc:
+            logger.exception("Time-align merge failed; falling back to stack")
+            report["schema_warnings"].append(
+                f"Time-align failed ({exc}); falling back to row-stack "
+                "with NaN-filled missing columns."
+            )
+            strategy = "stack"
+
+    if strategy == "stack":
+        # --- Pass 3 (stack): align columns. ---
+        try:
+            aligned = normalize_column_structure(frames)
+        except Exception as exc:
+            # Should not happen — column-set arithmetic is bulletproof.
+            logger.exception("normalize_column_structure failed")
+            report["schema_warnings"].append(f"Column alignment failed: {exc}")
+            aligned = frames  # fall back to raw frames
+
+        # --- Pass 4 (stack): concatenate. ---
+        # ``source_file`` is only useful when ≥ 2 files were merged. On a
+        # single-file upload every row would have the same value, which is
+        # redundant noise — so we omit it.
+        add_source = len(frames) > 1
+        try:
+            merged = merge_uploaded_files(aligned, add_source=add_source)
+        except Exception as exc:
+            logger.exception("merge_uploaded_files failed")
+            report["schema_warnings"].append(
+                f"Final concat failed ({exc}); returning the first file only."
+            )
+            # Last-resort: return the first frame so the app doesn't crash.
+            merged = next(iter(aligned.values())).copy()
+            if add_source:
+                merged.insert(
+                    0, "source_file",
+                    pd.Categorical([next(iter(aligned.keys()))] * len(merged)),
+                )
 
     report["merged_rows"] = int(len(merged))
     report["merged_cols"] = int(merged.shape[1])
@@ -352,6 +401,175 @@ def merge_uploaded_files(
 
 
 # ============================================================================
+# TIME-ALIGN MERGE (different schemas, joined on date/time)
+# ============================================================================
+def _detect_first_datetime(df: pd.DataFrame) -> str | None:
+    """Best-guess datetime column to use as the time axis.
+
+    Preference order:
+      1. Any column already typed as datetime64 — these came out of the
+         sanitization pass with high confidence.
+      2. First column accepted by ``time_series.detect_datetime_columns``
+         (heuristic parse of string columns).
+
+    Returns ``None`` if the frame has no usable time axis — the caller
+    should fall back to row-stacking in that case.
+    """
+    for c in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[c]):
+            return c
+    try:
+        # Lazy import — avoids a hard dependency cycle if time_series ever
+        # grows to import from this module.
+        from .time_series import detect_datetime_columns
+        dt_cols = detect_datetime_columns(df)
+        return dt_cols[0] if dt_cols else None
+    except Exception:
+        logger.exception("Datetime detection failed")
+        return None
+
+
+def _decide_merge_strategy(
+    frames: dict[str, pd.DataFrame],
+) -> tuple[str, dict[str, str | None]]:
+    """Pick ``"stack"`` or ``"time_align"`` based on schema overlap.
+
+    Same schemas everywhere → stack rows (preserves current behaviour).
+    Schemas differ AND every file has a datetime column → time_align.
+    Schemas differ but at least one file lacks a datetime column → stack
+    (with a warning emitted by the caller via validate_schema).
+    """
+    time_cols: dict[str, str | None] = {
+        n: _detect_first_datetime(df) for n, df in frames.items()
+    }
+    if len(frames) <= 1:
+        return "stack", time_cols
+
+    # Signature = column set MINUS the chosen datetime column. This lets
+    # two files with different datetime-column names but otherwise the
+    # same schema still count as "matching" and stack normally.
+    sigs = {
+        n: frozenset(c for c in df.columns if c != time_cols[n])
+        for n, df in frames.items()
+    }
+    if len(set(sigs.values())) == 1:
+        return "stack", time_cols
+
+    if all(time_cols.values()):
+        return "time_align", time_cols
+    return "stack", time_cols
+
+
+def _time_align_merge(
+    frames: dict[str, pd.DataFrame],
+    time_cols: dict[str, str],
+) -> pd.DataFrame:
+    """Group files by schema, stack within group, then merge_asof on time.
+
+    Algorithm
+    ---------
+    1. Group frames by their non-datetime column signature so files that
+       share a schema (e.g. three monthly partitions of sensor data) stack
+       vertically into one wide frame.
+    2. Within each group, canonicalize the datetime column to the first
+       file's name and stack.
+    3. Pick the densest group (most rows) as the **anchor** — this is
+       typically the 1-minute sensor stream.
+    4. ``pd.merge_asof(..., direction="backward")`` each other group onto
+       the anchor. ``direction="backward"`` means "for each anchor row,
+       attach the most recent value from the sparser stream" — which is
+       exactly forward-fill-until-next-reading semantics.
+
+    The anchor's datetime column is preserved; the joined groups' datetime
+    columns are dropped from the result (they're redundant — the time
+    axis is the anchor's).
+    """
+    # --- Step 1: group by non-time column signature ---
+    sig_to_files: dict[frozenset, list[str]] = {}
+    for name in frames:
+        sig = frozenset(
+            c for c in frames[name].columns if c != time_cols[name]
+        )
+        sig_to_files.setdefault(sig, []).append(name)
+
+    # --- Step 2: build one DataFrame per signature group ---
+    groups: list[tuple[str, pd.DataFrame, str]] = []  # (label, df, time_col)
+    for sig, names in sig_to_files.items():
+        canonical_time = time_cols[names[0]]
+        bits = []
+        for n in names:
+            d = frames[n].copy()
+            # Different files in the same group may have different time
+            # column NAMES (e.g. "Timestamp" vs "DateTime"). Canonicalize
+            # to the first file's name so the stack works cleanly.
+            if time_cols[n] != canonical_time:
+                d = d.rename(columns={time_cols[n]: canonical_time})
+            d[canonical_time] = pd.to_datetime(
+                d[canonical_time], errors="coerce",
+            )
+            # Strip timezone info — merge_asof rejects a tz-aware key
+            # joined against a tz-naive key. Industrial datasets rarely
+            # carry consistent tz metadata anyway.
+            if (
+                pd.api.types.is_datetime64_any_dtype(d[canonical_time])
+                and getattr(d[canonical_time].dt, "tz", None) is not None
+            ):
+                d[canonical_time] = d[canonical_time].dt.tz_localize(None)
+            d["__source_file__"] = n
+            bits.append(d)
+        group_df = pd.concat(bits, axis=0, ignore_index=True, sort=False)
+        # merge_asof requires both sides sorted by the join key and free
+        # of NaT in that key.
+        group_df = (
+            group_df.dropna(subset=[canonical_time])
+            .sort_values(canonical_time)
+            .reset_index(drop=True)
+        )
+        if group_df.empty:
+            continue
+        label = " + ".join(names)
+        groups.append((label, group_df, canonical_time))
+
+    if not groups:
+        return pd.DataFrame()
+
+    # --- Step 3 + 4: anchor on the densest group, merge_asof the rest ---
+    groups.sort(key=lambda t: -len(t[1]))
+    anchor_label, anchor_df, anchor_time = groups[0]
+    # Promote the anchor's per-row source tag to the public name.
+    result = anchor_df.rename(columns={"__source_file__": "source_file"})
+
+    for label, other_df, other_time in groups[1:]:
+        # Rename the other group's time column to match the anchor's so
+        # merge_asof can use a single ``on=`` key. The other group's
+        # internal source tag becomes its own column so provenance is
+        # preserved without colliding with the anchor's source_file.
+        renames = {"__source_file__": f"source_file__{label}"}
+        if other_time != anchor_time:
+            renames[other_time] = anchor_time
+        other_df = other_df.rename(columns=renames)
+        # Both sides must be sorted by the merge key.
+        result = result.sort_values(anchor_time).reset_index(drop=True)
+        other_df = other_df.sort_values(anchor_time).reset_index(drop=True)
+        result = pd.merge_asof(
+            result,
+            other_df,
+            on=anchor_time,
+            direction="backward",
+            allow_exact_matches=True,
+        )
+
+    # source_file is the anchor's per-file tag; keep it categorical for
+    # the same memory-efficiency reasons as stack mode.
+    if "source_file" in result.columns:
+        result["source_file"] = result["source_file"].astype("category")
+        cols = ["source_file"] + [c for c in result.columns if c != "source_file"]
+        result = result[cols]
+
+    return make_arrow_safe(result)
+
+
+# ============================================================================
 # INTERNAL
 # ============================================================================
 def _empty_report() -> dict[str, Any]:
@@ -363,4 +581,6 @@ def _empty_report() -> dict[str, Any]:
         "merged_rows": 0,
         "merged_cols": 0,
         "source_files": [],
+        "merge_strategy": "stack",
+        "time_align_keys": {},
     }

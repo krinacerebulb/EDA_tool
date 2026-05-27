@@ -296,10 +296,31 @@ st.success(
 # context to report. Single-file uploads with a clean schema produce no
 # warnings, so this panel stays out of the way.
 if len(_ok_files) > 1 or multi_report.get("schema_warnings"):
+    _merge_strategy = multi_report.get("merge_strategy", "stack")
+    _strategy_label = (
+        "Time-align (join on date/time)"
+        if _merge_strategy == "time_align"
+        else "Stack rows (same schema)"
+    )
     with st.expander(
-        f"📂 Multi-file merge summary — {len(_ok_files)} file(s) merged",
+        f"📂 Multi-file merge summary — {len(_ok_files)} file(s) "
+        f"merged · {_strategy_label}",
         expanded=bool(multi_report.get("schema_warnings")),
     ):
+        if _merge_strategy == "time_align":
+            _keys = multi_report.get("time_align_keys", {})
+            st.info(
+                "🕒 **Time-align mode active.** Schemas differed across the "
+                "uploaded files, so they were joined on their date/time "
+                "columns instead of stacked. The densest file is the "
+                "anchor; sparser values (e.g. 6-hour lab shifts) carry "
+                "forward on every anchor row until the next reading."
+                + (
+                    " · Datetime columns used: "
+                    + ", ".join(f"`{n}` → `{tc}`" for n, tc in _keys.items())
+                    if _keys else ""
+                )
+            )
         mc1, mc2, mc3, mc4 = st.columns(4)
         mc1.metric("Files merged", len(_ok_files))
         mc2.metric("Files failed", len(_bad_files))
