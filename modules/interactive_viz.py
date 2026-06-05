@@ -26,7 +26,7 @@ import seaborn as sns
 import plotly.express as px  # noqa: F401 — kept for parity / future use
 import plotly.graph_objects as go
 
-from utils.helpers import plotly_template
+from utils.helpers import apply_legend, plotly_template, short_label
 
 
 # Consistent figure size + base style. Seaborn whitegrid + a slim DPI keeps
@@ -424,9 +424,10 @@ def outlier_scatter(
         yaxis_title=column,
         template=plotly_template(),
         hovermode="closest",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         margin=dict(l=10, r=10, t=70, b=10),
     )
+    # Size + place the legend from the actual series so it's always visible.
+    apply_legend(fig)
     if precision is not None:
         fig.update_yaxes(tickformat=f".{p}f")
     return fig
@@ -603,9 +604,10 @@ def multi_line_time_series(
                 x=work[date_col],
                 y=work[col],
                 mode="lines",
-                name=col,
+                # Legend shows a shortened tag; the full name stays in hover.
+                name=short_label(col),
                 line=dict(color=next(color_iter), width=1.8),
-                hovertemplate=f"{date_col}: %{{x}}<br>{col}: %{{y}}<extra></extra>",
+                hovertemplate=f"{col}<br>{date_col}: %{{x}}<br>%{{y}}<extra></extra>",
             )
         )
 
@@ -615,35 +617,45 @@ def multi_line_time_series(
                 x=work[date_col],
                 y=work[col],
                 mode="lines",
-                name=f"{col} (right axis)",
+                name=f"{short_label(col)} (right axis)",
                 line=dict(color=next(color_iter), width=1.8, dash="dot"),
                 yaxis="y2",
-                hovertemplate=f"{date_col}: %{{x}}<br>{col}: %{{y}}<extra></extra>",
+                hovertemplate=f"{col} (right axis)<br>{date_col}: %{{x}}<br>%{{y}}<extra></extra>",
             )
         )
 
-    title_cols = ", ".join(value_cols)
+    # Title: with long industrial tags, joining every column name overflows
+    # the header, so collapse to a count when there's more than one series.
+    if len(value_cols) == 1:
+        title = f"{short_label(value_cols[0])} over {date_col}"
+    else:
+        title = f"{len(value_cols)} series over {date_col}"
+
+    # Axis titles are intentionally omitted: each series is already named in
+    # the legend, and printing the full tag(s) vertically on the y-axis (and
+    # again on the right axis) produced giant, unreadable side labels.
+    # x-axis title is omitted on purpose — the title already says "over
+    # {date_col}", and a redundant axis label only competes with the legend
+    # for the bottom strip.
     layout: dict = dict(
-        title=f"{title_cols} over {date_col}",
-        xaxis_title=date_col,
+        title=title,
         template=plotly_template(),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
     if secondary:
-        layout["yaxis"] = dict(title=", ".join(primary))
         layout["yaxis2"] = dict(
-            title=", ".join(secondary),
             overlaying="y",
             side="right",
             showgrid=False,
         )
-    else:
-        layout["yaxis_title"] = ", ".join(primary)
 
     fig.update_layout(**layout)
+    # Legend goes below the plot — clear of the range-selector buttons at the
+    # top (and of the secondary right axis when present).
+    apply_legend(fig, below=True, secondary_axis=bool(secondary))
     fig.update_xaxes(
-        rangeslider_visible=True,
+        # No range-slider: the mini-plot collided with the legend below it,
+        # and the range-selector buttons already provide the time filtering.
         rangeselector=dict(
             buttons=[
                 dict(count=7, label="1w", step="day", stepmode="backward"),

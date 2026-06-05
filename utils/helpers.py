@@ -56,6 +56,159 @@ def plotly_template() -> str:
     return "plotly_white"
 
 
+def horizontal_legend(below: bool = False) -> dict:
+    """Plotly ``legend=`` config: horizontal and centered.
+
+    A horizontal, centered legend keeps every series label visible when a
+    chart has many traces (multi-sensor time-series, grouped outliers). The
+    default vertical right-side legend and a left-anchored top legend both
+    clip with long names or high series counts.
+
+    Parameters
+    ----------
+    below
+        ``True``  → place the legend *below* the plot (``y=-0.2``). Use this
+                    for charts with NO range-slider; leave bottom margin room
+                    (e.g. ``margin=dict(b=80)``) so it isn't clipped.
+        ``False`` → place it just *above* the plot (``y=1.02``). Safe for
+                    charts that already have a range-slider / range-selector
+                    occupying the area below the x-axis, where a below-legend
+                    would collide with them.
+    """
+    if below:
+        return dict(
+            orientation="h", x=0.5, xanchor="center", y=-0.2, yanchor="top",
+        )
+    return dict(
+        orientation="h", x=0.5, xanchor="center", y=1.02, yanchor="bottom",
+    )
+
+
+def side_legend(font_size: int = 10) -> dict:
+    """Plotly ``legend=`` config: vertical, anchored to the right of the plot.
+
+    Each series gets its own line, so nothing clips horizontally no matter
+    how many traces there are — the best option for many-series or long-name
+    charts (multi-sensor time-series). Sitting *outside* the plot (``x=1.02``)
+    keeps it clear of the data and of a bottom range-slider.
+
+    Pair with a wide right margin so the legend isn't cut off — e.g.
+    ``margin=dict(r=200)``. Avoid on charts with a secondary *right* y-axis,
+    where the legend and the axis title would overlap; use
+    :func:`horizontal_legend` (top) there instead.
+    """
+    return dict(
+        orientation="v",
+        x=1.02,
+        y=1,
+        xanchor="left",
+        yanchor="top",
+        font=dict(size=font_size),
+    )
+
+
+def short_label(text, max_len: int = 30) -> str:
+    """Shorten a long label, keeping its END with a leading ellipsis.
+
+    Industrial sensor tags (e.g.
+    ``HIL_ALU_HKD_SMLTR_85_..._POT_002_BATH_TEMP``) share a long common prefix
+    and differ only in the last few segments, so the *tail* is what
+    distinguishes them. Keeping the tail (not the head) means two near-
+    identical tags still read as different in a legend / title. Full text
+    stays available in hover tooltips.
+    """
+    s = str(text)
+    if len(s) <= max_len:
+        return s
+    return "…" + s[-(max_len - 1):]
+
+
+def _legend_below(fig, font_size: int):
+    """Place a horizontal, centered legend BELOW the plot (wraps onto rows).
+
+    Used for charts whose top edge is occupied by range-selector buttons
+    (``1w 1m 3m 6m 1y All``) — a top legend would sit under those buttons.
+    The horizontal orientation wraps across multiple rows, so even many
+    series stay fully visible. The bottom margin reserves room for it beneath
+    the x-axis date labels.
+    """
+    fig.update_layout(
+        legend=dict(
+            orientation="h", x=0.5, xanchor="center",
+            y=-0.30, yanchor="top", font=dict(size=font_size),
+        ),
+        margin_b=100,
+    )
+    return fig
+
+
+def apply_legend(
+    fig, *, secondary_axis: bool = False, below: bool = False,
+    font_size: int = 10,
+):
+    """Attach a fully-visible, correctly-sized legend to a Plotly figure.
+
+    This is the single entry point every Plotly chart should use so legends
+    look consistent and never clip. It inspects the figure's own traces and
+    adapts placement + margin to the chart:
+
+    * **Few / no legend traces** (0–1 series): Plotly hides the legend for a
+      single trace anyway, so nothing is changed — no wasted margin.
+    * **``below=True``** (charts with range-selector buttons / a range-slider,
+      i.e. time-series): a horizontal legend *below* the plot, wrapping onto
+      rows. This is the placement that clears both the ``1w 1m … All`` buttons
+      at the top and the range-slider at the bottom. Many series stay visible
+      because the horizontal legend wraps.
+    * **Several series, single y-axis** (the common non-time-series case): a
+      *vertical* legend just right of the plot, one entry per line. The right
+      margin is sized from the longest label so long sensor names show in full
+      without wasting space on short ones.
+    * **Many series** (> ~18) without ``below``: falls back to the horizontal
+      below-plot legend — a tall vertical list would run off the figure.
+    * **Secondary (right) y-axis present** (and not ``below``): a right-side
+      legend would overlap the axis title, so a horizontal legend goes *above*
+      the plot instead.
+
+    Call this AFTER all traces have been added.
+    """
+    names = [
+        str(t.name)
+        for t in fig.data
+        if getattr(t, "name", None)
+        and getattr(t, "showlegend", None) is not False
+    ]
+    n = len(names)
+
+    # Single (or zero) series — Plotly won't show a legend; leave layout be.
+    if n < 2:
+        return fig
+
+    # Time-series-style charts: the top is taken by range buttons and the
+    # bottom by a range-slider, so the legend goes below (clear of both).
+    # Also the fallback for very many series, where a vertical list overflows
+    # (that fallback has no range-slider, so it needs less clearance).
+    if below or n > 18:
+        return _legend_below(fig, font_size)
+
+    # A right-side legend collides with a right y-axis → horizontal on top.
+    if secondary_axis:
+        fig.update_layout(
+            legend=dict(
+                orientation="h", x=0.5, xanchor="center",
+                y=1.02, yanchor="bottom", font=dict(size=font_size),
+            ),
+        )
+        return fig
+
+    # Common case: vertical legend to the right. Size the right margin from
+    # the longest label (≈7 px/char at size 10) and clamp to a sane range so
+    # it neither clips long names nor wastes space on short ones.
+    longest = max(len(s) for s in names)
+    right = int(min(420, max(140, longest * 7 + 60)))
+    fig.update_layout(legend=side_legend(font_size), margin_r=right)
+    return fig
+
+
 _DEFAULT_DECIMAL_PRECISION = 2
 
 

@@ -22,6 +22,28 @@ from .data_sanitization import preprocess_dynamic_dataset
 
 
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json", ".parquet", ".pq"}
+EXCEL_EXTENSIONS = {".xlsx", ".xls"}
+
+
+@st.cache_data(show_spinner=False)
+def list_excel_sheets(file_bytes: bytes, filename: str) -> list[str]:
+    """Return the sheet names inside an uploaded Excel workbook.
+
+    Returns an empty list for non-Excel files or if the workbook can't be
+    opened. Cached on (bytes_hash, filename) so opening the workbook to read
+    its sheet index doesn't re-run on every Streamlit rerun.
+
+    The UI uses this to decide whether to show a sheet picker: a workbook with
+    a single sheet needs no selector, one with several does.
+    """
+    suffix = Path(filename).suffix.lower()
+    if suffix not in EXCEL_EXTENSIONS:
+        return []
+    try:
+        xls = pd.ExcelFile(BytesIO(file_bytes))
+        return list(xls.sheet_names)
+    except Exception:
+        return []
 
 
 def _read_csv(file_bytes: bytes) -> pd.DataFrame:
@@ -50,8 +72,10 @@ def _read_parquet(file_bytes: bytes) -> pd.DataFrame:
 # stack a second "Loading dataset…" overlay on top of the caller's
 # spinner — visible to the user as the UI flashing twice on upload.
 @st.cache_data(show_spinner=False)
-def _read_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Parse raw bytes into a DataFrame. Cached on (bytes_hash, filename).
+def _read_bytes(
+    file_bytes: bytes, filename: str, sheet_name: str | None = None,
+) -> pd.DataFrame:
+    """Parse raw bytes into a DataFrame. Cached on (bytes_hash, filename, sheet).
 
     Pipeline:
       1. Parse with the format-appropriate engine (Polars-first for CSV /
@@ -79,7 +103,13 @@ def _read_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
         if suffix == ".csv":
             df = _read_csv(file_bytes)
         elif suffix in {".xlsx", ".xls"}:
-            df = pd.read_excel(BytesIO(file_bytes))
+            # ``sheet_name=None`` would make pandas return a *dict* of every
+            # sheet, so only pass it through when a specific sheet was chosen.
+            # Leaving it off reads the first sheet (pandas' default).
+            if sheet_name is not None:
+                df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name)
+            else:
+                df = pd.read_excel(BytesIO(file_bytes))
         elif suffix == ".json":
             df = pd.read_json(BytesIO(file_bytes))
         elif suffix in {".parquet", ".pq"}:
@@ -110,11 +140,16 @@ def _read_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return clean_df
 
 
-def load_dataset(uploaded_file) -> pd.DataFrame:
+def load_dataset(uploaded_file, sheet_name: str | None = None) -> pd.DataFrame:
     """
     Read a file-like object from Streamlit's uploader into a DataFrame.
 
     Supported formats: CSV, Excel (.xlsx / .xls), JSON, Parquet (.parquet / .pq).
+
+    ``sheet_name`` selects a specific sheet from a multi-sheet Excel workbook;
+    when ``None`` (the default, and the only meaningful value for non-Excel
+    files) pandas reads the first sheet. Use :func:`list_excel_sheets` to
+    discover the available sheet names for the picker.
 
     Raises ValueError if the extension is unsupported or the file can't be
     parsed. Implementation delegates to a bytes-based cached reader so the
@@ -122,7 +157,7 @@ def load_dataset(uploaded_file) -> pd.DataFrame:
     """
     if uploaded_file is None:
         raise ValueError("No file was provided.")
-    return _read_bytes(uploaded_file.getvalue(), uploaded_file.name)
+    return _read_bytes(uploaded_file.getvalue(), uploaded_file.name, sheet_name)
 
 
 def apply_header_overrides(
@@ -138,25 +173,41 @@ def apply_header_overrides(
 
     Order is: drop ``drop_first_n`` rows from the top, then (if requested)
     take what is now the first row and use its values as the new column
-    names — that row is consumed in the process. Numeric-looking cells are
-    re-coerced via ``pd.to_numeric`` since the previously-parsed dtypes
-    were based on the wrong header.
+    names — that row is consumed in the process.
+
+    Crucially, once the rows/header have been corrected the **entire
+    sanitization pipeline is re-run** (``preprocess_dynamic_dataset``). The
+    first parse — back in :func:`_read_bytes` — detected every column's dtype
+    against the *wrong* header, so:
+
+      * a numeric sensor column that had a text header row sitting on top of
+        it was read as ``object`` and never recognised as numeric;
+      * an all-text real-header row produced ``Unnamed_*`` placeholder column
+        names and integer-positional headers.
+
+    Re-running the pipeline here means type detection, token cleaning, and
+    categorical compression all happen *against the corrected header*, so
+    every downstream tab sees correctly-typed columns and the sanitization
+    banner reflects the post-header state. The freshly-computed report
+    replaces the stale one in ``df.attrs["sanitization_report"]``.
     """
     drop_first_n = max(0, int(drop_first_n))
     if drop_first_n == 0 and not promote_row_to_header:
         return df
 
     out = df
-    # Preserve the upstream sanitization metadata so downstream banners
-    # still describe what was cleaned on load.
+    # Preserve any non-sanitization metadata from the original frame. The
+    # sanitization report itself is intentionally regenerated below, since
+    # the old one describes the pre-header-override data.
     original_attrs = dict(getattr(df, "attrs", {}) or {})
+    original_attrs.pop("sanitization_report", None)
     if drop_first_n > 0:
         out = out.iloc[drop_first_n:].reset_index(drop=True)
 
     if promote_row_to_header and len(out) > 0:
         # Categorical columns can't accept arbitrary new values when we
         # re-coerce later; demote them to object first so the row-promotion
-        # and subsequent numeric retry are unconstrained.
+        # and subsequent re-sanitization are unconstrained.
         for c in out.columns:
             if isinstance(out[c].dtype, pd.CategoricalDtype):
                 out[c] = out[c].astype(object)
@@ -178,19 +229,16 @@ def apply_header_overrides(
         out = out.iloc[1:].reset_index(drop=True)
         out.columns = new_header
 
-        # Reading-with-wrong-header would have left numeric sensor columns
-        # parsed as object. Try a column-wise numeric coercion now that the
-        # real header is in place; leave anything that doesn't cleanly
-        # parse as-is for the downstream smart-conversion + sanitization
-        # passes to handle.
-        for c in out.columns:
-            if out[c].dtype == object:
-                coerced = pd.to_numeric(out[c], errors="coerce")
-                if coerced.notna().sum() == out[c].notna().sum() and coerced.notna().any():
-                    out[c] = coerced
+    # Re-run the full sanitization / type-detection pipeline now that the
+    # rows and header are correct. This is the "re-run every logic after the
+    # header option is applied" step — it supersedes the old ad-hoc numeric
+    # coercion, which only fixed numbers and missed datetimes, booleans, and
+    # token cleaning. ``preprocess_dynamic_dataset`` never raises.
+    out, report = preprocess_dynamic_dataset(out)
 
     try:
         out.attrs.update(original_attrs)
+        out.attrs["sanitization_report"] = report
     except Exception:
         pass
     return out

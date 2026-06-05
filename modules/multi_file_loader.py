@@ -92,7 +92,9 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # PUBLIC ENTRY POINT
 # ============================================================================
-def load_multiple_files(uploaded_files) -> tuple[pd.DataFrame, dict[str, Any]]:
+def load_multiple_files(
+    uploaded_files, sheet_selection: dict[str, str] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Load N files, sanitize each, validate schemas, merge into one frame.
 
     Parameters
@@ -102,6 +104,14 @@ def load_multiple_files(uploaded_files) -> tuple[pd.DataFrame, dict[str, Any]]:
         and ``.getvalue()``). Pass a single file in a list to use single-file
         mode — the merge step is a no-op when only one file succeeds and the
         ``source_file`` column is intentionally omitted.
+    sheet_selection
+        Optional ``{filename: [sheet_name, ...]}`` map telling the loader which
+        sheet(s) to read from a multi-sheet Excel workbook. A single value
+        loads that one sheet under the original filename; several values load
+        each sheet as its own frame (labelled ``"file.xlsx [Sheet]"``) and
+        merge them like multiple files. Filenames not in the map (and all
+        non-Excel files) fall back to the first sheet. A plain ``str`` value is
+        accepted as shorthand for a one-element list.
 
     Returns
     -------
@@ -117,6 +127,7 @@ def load_multiple_files(uploaded_files) -> tuple[pd.DataFrame, dict[str, Any]]:
       and skipped; the rest of the batch is processed normally.
     """
     report: dict[str, Any] = _empty_report()
+    sheet_selection = sheet_selection or {}
 
     if not uploaded_files:
         return pd.DataFrame(), report
@@ -128,31 +139,35 @@ def load_multiple_files(uploaded_files) -> tuple[pd.DataFrame, dict[str, Any]]:
     frames: dict[str, pd.DataFrame] = {}
     for uf in uploaded_files:
         name = getattr(uf, "name", "<unknown>")
-        try:
-            df = load_dataset(uf)
-            if df is None or df.empty:
-                report["per_file"][name] = {
-                    "rows": 0,
-                    "cols": int(df.shape[1]) if df is not None else 0,
-                    "status": "empty",
-                    "error": "File parsed successfully but contained no rows.",
+        # Expand each upload into one-or-more (label, sheet) load tasks. A
+        # workbook with several selected sheets yields one task per sheet,
+        # each labelled "file.xlsx [Sheet]" so it merges like a separate file.
+        for load_label, sheet in _expand_sheet_tasks(name, sheet_selection.get(name)):
+            try:
+                df = load_dataset(uf, sheet_name=sheet)
+                if df is None or df.empty:
+                    report["per_file"][load_label] = {
+                        "rows": 0,
+                        "cols": int(df.shape[1]) if df is not None else 0,
+                        "status": "empty",
+                        "error": "File parsed successfully but contained no rows.",
+                    }
+                    continue
+                frames[load_label] = df
+                report["per_file"][load_label] = {
+                    "rows": int(len(df)),
+                    "cols": int(df.shape[1]),
+                    "status": "ok",
+                    "error": None,
                 }
-                continue
-            frames[name] = df
-            report["per_file"][name] = {
-                "rows": int(len(df)),
-                "cols": int(df.shape[1]),
-                "status": "ok",
-                "error": None,
-            }
-        except Exception as exc:
-            # Corrupted file / unsupported encoding / parser failure — log,
-            # record, move on. The remaining files still get processed.
-            logger.exception("Failed to load %s", name)
-            report["per_file"][name] = {
-                "rows": 0, "cols": 0,
-                "status": "failed", "error": str(exc),
-            }
+            except Exception as exc:
+                # Corrupted file / unsupported encoding / parser failure — log,
+                # record, move on. The remaining files still get processed.
+                logger.exception("Failed to load %s", load_label)
+                report["per_file"][load_label] = {
+                    "rows": 0, "cols": 0,
+                    "status": "failed", "error": str(exc),
+                }
 
     if not frames:
         report["schema_warnings"].append(
@@ -572,6 +587,28 @@ def _time_align_merge(
 # ============================================================================
 # INTERNAL
 # ============================================================================
+def _expand_sheet_tasks(
+    name: str, sheets,
+) -> list[tuple[str, str | None]]:
+    """Turn a file's sheet selection into ``(load_label, sheet_name)`` tasks.
+
+    * No selection (``None``/empty) or a non-Excel file → a single task that
+      reads the default sheet under the original filename.
+    * One selected sheet → a single task under the original filename (kept
+      clean — no ``[Sheet]`` suffix when there's nothing to disambiguate).
+    * Several selected sheets → one task per sheet, each labelled
+      ``"file.xlsx [Sheet]"`` so downstream merge/source tagging treats each
+      sheet as its own file.
+    """
+    if not sheets:
+        return [(name, None)]
+    if isinstance(sheets, str):
+        sheets = [sheets]
+    if len(sheets) == 1:
+        return [(name, sheets[0])]
+    return [(f"{name} [{s}]", s) for s in sheets]
+
+
 def _empty_report() -> dict[str, Any]:
     return {
         "per_file": {},

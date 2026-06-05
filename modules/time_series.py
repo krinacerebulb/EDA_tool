@@ -16,7 +16,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from utils.helpers import plotly_template
+from utils.helpers import apply_legend, plotly_template, short_label
 
 
 _DATETIME_PARSE_THRESHOLD = 0.7  # % of sampled values that must parse
@@ -232,10 +232,11 @@ def time_series_plot(
             x=prepared[date_col],
             y=prepared[value_col],
             mode="lines",
-            name=value_col,
+            # Legend shows a shortened tag; the full name stays in hover.
+            name=short_label(value_col),
             line=dict(color="#636EFA", width=1.5),
             opacity=0.85,
-            hovertemplate=f"{date_col}: %{{x}}<br>{value_col}: %{{y}}<extra></extra>",
+            hovertemplate=f"{value_col}<br>{date_col}: %{{x}}<br>%{{y}}<extra></extra>",
         )
     )
 
@@ -254,16 +255,18 @@ def time_series_plot(
             )
         )
 
+    # Long industrial tags overflow the title and print a giant vertical
+    # y-axis label, so shorten the title and drop the y-axis title (the
+    # series is already named in the legend below). The x-axis title is
+    # redundant with "over {date_col}" and only crowds the legend.
     fig.update_layout(
-        title=f"{value_col} over {date_col}",
-        xaxis_title=date_col,
-        yaxis_title=value_col,
+        title=f"{short_label(value_col)} over {date_col}",
         template=plotly_template(),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
     fig.update_xaxes(
-        rangeslider_visible=True,
+        # No range-slider: it collided with the legend below it, and the
+        # range-selector buttons already provide the time filtering.
         rangeselector=dict(
             buttons=[
                 dict(count=7, label="1w", step="day", stepmode="backward"),
@@ -275,6 +278,10 @@ def time_series_plot(
             ]
         ),
     )
+    # Legend goes below the plot: the top is taken by the range-selector
+    # buttons (1w/1m/…/All) and the bottom by the range-slider, so a
+    # below-plot legend is the only spot clear of both.
+    apply_legend(fig, below=True)
     return fig
 
 

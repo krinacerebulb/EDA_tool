@@ -138,6 +138,42 @@ uploaded_files = st.sidebar.file_uploader(
     ),
 )
 
+# Excel sheet selection. A workbook can hold several sheets; pandas reads
+# only the first by default. When any uploaded ``.xlsx`` / ``.xls`` has more
+# than one sheet, surface a per-file picker so the user can choose one OR
+# several sheets to analyse. Selecting multiple sheets from one workbook
+# merges them just like multiple uploaded files (each sheet becomes its own
+# frame). Single-sheet workbooks and non-Excel files need no UI.
+sheet_selection: dict[str, list[str]] = {}
+if uploaded_files:
+    _multi_sheet_files = []
+    for _uf in uploaded_files:
+        _sheets = data_loader.list_excel_sheets(_uf.getvalue(), _uf.name)
+        if len(_sheets) > 1:
+            _multi_sheet_files.append((_uf.name, _sheets))
+    if _multi_sheet_files:
+        with st.sidebar.expander("📑 Excel sheet selection", expanded=True):
+            st.caption(
+                "These workbook(s) have multiple sheets. Pick one or more "
+                "sheets to load for each — the first sheet is used by "
+                "default. Choosing several sheets merges them like multiple "
+                "files."
+            )
+            for _fname, _sheets in _multi_sheet_files:
+                _chosen = st.multiselect(
+                    f"Sheet(s) for **{_fname}**",
+                    _sheets,
+                    default=[_sheets[0]],
+                    key=f"sheet_select_{_fname}",
+                    help=(
+                        f"{len(_sheets)} sheets available. Select multiple to "
+                        "stack/merge them into one dataset."
+                    ),
+                )
+                # Fall back to the first sheet if the user clears the box,
+                # so the file still loads instead of silently disappearing.
+                sheet_selection[_fname] = _chosen or [_sheets[0]]
+
 # Header / row-drop overrides. Industrial sensor exports often start with
 # metadata, machine info or blank rows before the real header — give the
 # user a way to fix that without re-uploading.
@@ -221,6 +257,7 @@ with st.spinner(
     try:
         raw_df, multi_report = multi_file_loader.load_multiple_files(
             uploaded_files,
+            sheet_selection=sheet_selection,
         )
     except Exception as exc:
         st.error(f"Unexpected error while loading the files: {exc}")
