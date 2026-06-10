@@ -426,6 +426,8 @@ def _detect_first_datetime(df: pd.DataFrame) -> str | None:
          sanitization pass with high confidence.
       2. First column accepted by ``time_series.detect_datetime_columns``
          (heuristic parse of string columns).
+      3. First numeric column that looks like a datetime encoding (Excel serial,
+         Unix epoch) according to ``datetime_formatter.detect_numeric_datetime_columns``.
 
     Returns ``None`` if the frame has no usable time axis — the caller
     should fall back to row-stacking in that case.
@@ -438,10 +440,20 @@ def _detect_first_datetime(df: pd.DataFrame) -> str | None:
         # grows to import from this module.
         from .time_series import detect_datetime_columns
         dt_cols = detect_datetime_columns(df)
-        return dt_cols[0] if dt_cols else None
+        if dt_cols:
+            return dt_cols[0]
     except Exception:
         logger.exception("Datetime detection failed")
-        return None
+
+    try:
+        from .datetime_formatter import detect_numeric_datetime_columns
+        num_dt_cols = detect_numeric_datetime_columns(df)
+        if num_dt_cols:
+            return num_dt_cols[0]["column"]
+    except Exception:
+        logger.exception("Numeric datetime detection failed")
+
+    return None
 
 
 def _decide_merge_strategy(
@@ -449,25 +461,18 @@ def _decide_merge_strategy(
 ) -> tuple[str, dict[str, str | None]]:
     """Pick ``"stack"`` or ``"time_align"`` based on schema overlap.
 
-    Same schemas everywhere → stack rows (preserves current behaviour).
-    Schemas differ AND every file has a datetime column → time_align.
-    Schemas differ but at least one file lacks a datetime column → stack
-    (with a warning emitted by the caller via validate_schema).
+    If every file has a usable datetime column, prefer ``time_align`` so the
+    files can be joined on the time axis. This covers both:
+
+    * matching schemas with different time coverage, and
+    * mismatched schemas that need to be aligned horizontally by time.
+
+    If at least one file lacks a datetime column, fall back to ``stack``.
     """
     time_cols: dict[str, str | None] = {
         n: _detect_first_datetime(df) for n, df in frames.items()
     }
     if len(frames) <= 1:
-        return "stack", time_cols
-
-    # Signature = column set MINUS the chosen datetime column. This lets
-    # two files with different datetime-column names but otherwise the
-    # same schema still count as "matching" and stack normally.
-    sigs = {
-        n: frozenset(c for c in df.columns if c != time_cols[n])
-        for n, df in frames.items()
-    }
-    if len(set(sigs.values())) == 1:
         return "stack", time_cols
 
     if all(time_cols.values()):
@@ -519,9 +524,16 @@ def _time_align_merge(
             # to the first file's name so the stack works cleanly.
             if time_cols[n] != canonical_time:
                 d = d.rename(columns={time_cols[n]: canonical_time})
-            d[canonical_time] = pd.to_datetime(
-                d[canonical_time], errors="coerce",
-            )
+            if pd.api.types.is_numeric_dtype(d[canonical_time]):
+                from .datetime_formatter import detect_numeric_datetime_mode, convert_numeric_datetime
+                num_mode, _ = detect_numeric_datetime_mode(d[canonical_time])
+                if num_mode:
+                    parsed_dt, _ = convert_numeric_datetime(d[canonical_time], num_mode)
+                    d[canonical_time] = parsed_dt
+                else:
+                    d[canonical_time] = pd.to_datetime(d[canonical_time], errors="coerce")
+            else:
+                d[canonical_time] = pd.to_datetime(d[canonical_time], errors="coerce")
             # Strip timezone info — merge_asof rejects a tz-aware key
             # joined against a tz-naive key. Industrial datasets rarely
             # carry consistent tz metadata anyway.

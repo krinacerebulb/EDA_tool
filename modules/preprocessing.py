@@ -508,6 +508,7 @@ def _render_dt_numeric(df: pd.DataFrame) -> None:
         if pd.api.types.is_numeric_dtype(df[c])
         and not pd.api.types.is_bool_dtype(df[c])
         and c not in st.session_state.dropped_cols
+        and c not in st.session_state.dt_numeric_conversions
     ]
     st.caption(
         "Industrial / IoT exports often store timestamps as numbers: "

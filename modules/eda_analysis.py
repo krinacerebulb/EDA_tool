@@ -89,6 +89,7 @@ def numeric_statistics(df: pd.DataFrame, precision: int = 2) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
 @st.cache_data(show_spinner=False)
 def categorical_statistics(df: pd.DataFrame, top_n: int = 5) -> dict:
     """
