@@ -1,3 +1,11 @@
+[client]
+# Production polish: never show raw Python tracebacks to end users. Any
+# uncaught error renders as a calm, generic notice instead of a red stack
+# trace. Most sections also wrap their work in friendly fallbacks (see the
+# `safe_block` helper in app.py), so this is the last-resort safety net.
+showErrorDetails = "none"
+toolbarMode = "minimal"
+
 [server]
 headless = true
 enableCORS = false

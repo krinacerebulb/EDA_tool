@@ -56,31 +56,40 @@ def _new_axes(figsize=(_FIG_W, _FIG_H)):
 # --------------------------------------------------------------------- #
 
 def histogram(df: pd.DataFrame, column: str, bins: int = 30) -> plt.Figure:
-    """Histogram with mean and ±1σ overlays, rendered on the full series."""
+    """Distribution chart written for non-technical readers.
+
+    Instead of statistical jargon (mean, μ, standard deviation, σ) the chart
+    labels things in plain words: each bar shows *how many records* fall in a
+    value range, an "Average" line marks the typical value, and a "Middle
+    value" line marks the point where half the records sit below and half
+    above. No standard-deviation bands.
+    """
     series = pd.to_numeric(df[column], errors="coerce").dropna()
 
     fig, ax = _new_axes()
     sns.histplot(series, bins=bins, color=_BASE_COLOR, alpha=0.85,
                  edgecolor="white", ax=ax)
     ax.set_xlabel(column)
-    ax.set_ylabel("Frequency")
+    # "How many records" reads more plainly than "Frequency".
+    ax.set_ylabel("How many records")
 
-    title = f"Distribution of {column}"
+    title = f"How {column} values are spread out"
     if not series.empty:
-        mean = float(series.mean())
-        std = float(series.std()) if len(series) > 1 else float("nan")
+        average = float(series.mean())
+        middle = float(series.median())
 
-        if pd.notna(mean):
-            ax.axvline(mean, color=_ACCENT_COLOR, linewidth=2,
-                       label=f"μ = {mean:.3g}")
-        if pd.notna(std) and std > 0:
-            ax.axvline(mean - std, color=_BAND_COLOR, linewidth=1.4,
-                       linestyle="--", label=f"−1σ ({mean - std:.3g})")
-            ax.axvline(mean + std, color=_BAND_COLOR, linewidth=1.4,
-                       linestyle="--", label=f"+1σ ({mean + std:.3g})")
-            title = f"Distribution of {column}  —  μ = {mean:.3g}, σ = {std:.3g}"
-        elif pd.notna(mean):
-            title = f"Distribution of {column}  —  μ = {mean:.3g}"
+        if pd.notna(average):
+            ax.axvline(average, color=_ACCENT_COLOR, linewidth=2,
+                       label=f"Average = {average:.3g}")
+        # Only draw the middle-value line when it's visibly different from the
+        # average, otherwise the two lines overlap and just add clutter.
+        if pd.notna(middle) and (pd.isna(average) or abs(middle - average) > 1e-9):
+            ax.axvline(middle, color=_BAND_COLOR, linewidth=1.6,
+                       linestyle="--",
+                       label=f"Middle value = {middle:.3g}")
+
+        if pd.notna(average):
+            title = f"How {column} values are spread out  —  Average = {average:.3g}"
         ax.legend(loc="upper right", fontsize=8, frameon=True)
 
     ax.set_title(title, fontsize=11, fontweight="600")

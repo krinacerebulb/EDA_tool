@@ -4,10 +4,31 @@ Run with:
     streamlit run app.py
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+
+@contextmanager
+def safe_block(label: str = "this section"):
+    """Render a calm, friendly notice instead of a raw traceback on failure.
+
+    Wrap any self-contained piece of UI (a chart build, a table render, an
+    analysis step) in ``with safe_block("the chart"):``. If anything inside
+    raises, the user sees a polite message and the rest of the app keeps
+    working — so the product never exposes a red Python stack trace. A
+    config-level backstop (``client.showErrorDetails = "none"``) catches
+    anything not wrapped here.
+    """
+    try:
+        yield
+    except Exception:
+        st.warning(
+            f"⚠️ We couldn't build {label} with the current selection. "
+            "Please adjust your choices and try again."
+        )
 
 LOGO_PATH = Path(__file__).parent / "assets" / "cb-logo-tagline-main.png"
 LOGO = str(LOGO_PATH) if LOGO_PATH.exists() else None
@@ -927,7 +948,7 @@ with tabs[3]:
                 if cfg:
                     col, bins = cfg
                     if col in numeric_cols:
-                        with st.spinner("Building histogram…"):
+                        with st.spinner("Building histogram…"), safe_block("the histogram"):
                             st.pyplot(
                                 iviz.histogram(df, col, bins=bins),
                                 clear_figure=True,
@@ -950,7 +971,7 @@ with tabs[3]:
                     st.session_state["_viz_box_cfg"] = st.session_state["box_col"]
                 cfg = st.session_state.get("_viz_box_cfg")
                 if cfg and cfg in numeric_cols:
-                    with st.spinner("Building boxplot…"):
+                    with st.spinner("Building boxplot…"), safe_block("the boxplot"):
                         st.pyplot(iviz.boxplot(df, cfg), clear_figure=True)
                 elif cfg:
                     st.info("Selected column no longer exists — pick another and rebuild.")
@@ -965,7 +986,7 @@ with tabs[3]:
                 # is cheap (it doesn't touch the dataframe), so a rerun
                 # here is acceptable to keep Y/X mutually exclusive.
                 with st.form("viz_scatter_form", clear_on_submit=False, border=False):
-                    c1, c2, c3 = st.columns(3)
+                    c1, c2 = st.columns(2)
                     with c1:
                         st.selectbox("X axis", numeric_cols, key="scatter_x")
                     with c2:
@@ -974,26 +995,21 @@ with tabs[3]:
                             if c != st.session_state.get("scatter_x", numeric_cols[0])
                         ]
                         st.selectbox("Y axis", y_options, key="scatter_y")
-                    with c3:
-                        color_options = ["(none)"] + categorical_cols + numeric_cols
-                        st.selectbox("Colour by", color_options, key="scatter_color")
                     built = st.form_submit_button(
                         "📊 Build scatter plot",                        use_container_width=True,
                     )
                 if built:
-                    color_v = st.session_state["scatter_color"]
                     st.session_state["_viz_scatter_cfg"] = (
                         st.session_state["scatter_x"],
                         st.session_state["scatter_y"],
-                        None if color_v == "(none)" else color_v,
                     )
                 cfg = st.session_state.get("_viz_scatter_cfg")
                 if cfg:
-                    x_col, y_col, color_col = cfg
+                    x_col, y_col = cfg
                     if x_col in numeric_cols and y_col in numeric_cols:
-                        with st.spinner("Building scatter plot…"):
+                        with st.spinner("Building scatter plot…"), safe_block("the scatter plot"):
                             st.pyplot(
-                                iviz.scatter(df, x_col, y_col, color=color_col),
+                                iviz.scatter(df, x_col, y_col),
                                 clear_figure=True,
                             )
                     else:
@@ -1025,7 +1041,7 @@ with tabs[3]:
                 if cfg:
                     col, top_n = cfg
                     if col in categorical_cols:
-                        with st.spinner("Building bar chart…"):
+                        with st.spinner("Building bar chart…"), safe_block("the bar chart"):
                             st.pyplot(
                                 iviz.bar_chart(df, col, top_n=top_n),
                                 clear_figure=True,
@@ -1040,12 +1056,12 @@ with tabs[3]:
             if st.button("📊 Build correlation heatmap",                         key="viz_corr_build", use_container_width=True):
                 st.session_state["_viz_corr_built"] = True
             if st.session_state.get("_viz_corr_built"):
-                with st.spinner("Computing correlations…"):
+                with st.spinner("Computing correlations…"), safe_block("the correlation heatmap"):
                     fig = iviz.correlation_heatmap(df, precision=precision)
-                if fig is None:
-                    st.info("Need at least 2 numeric columns for a correlation heatmap.")
-                else:
-                    st.plotly_chart(fig, width="stretch")
+                    if fig is None:
+                        st.info("Need at least 2 numeric columns for a correlation heatmap.")
+                    else:
+                        st.plotly_chart(fig, width="stretch")
             else:
                 st.info("Click **Build correlation heatmap** to compute and render.")
 
@@ -1215,6 +1231,7 @@ with tabs[3]:
                             "reconfigure and click **Build time-series chart** again."
                         )
                     else:
+                      with safe_block("the time-series chart"):
                         fig = iviz.multi_line_time_series(
                             df,
                             date_col=ml_date,
@@ -1530,10 +1547,11 @@ with tabs[5]:
                 )
             hist_cfg = st.session_state.get("_target_hist_cfg")
             if hist_cfg and hist_cfg[0] == target:
-                st.pyplot(
-                    iviz.histogram(df, target, bins=hist_cfg[1]),
-                    clear_figure=True,
-                )
+                with safe_block("the distribution chart"):
+                    st.pyplot(
+                        iviz.histogram(df, target, bins=hist_cfg[1]),
+                        clear_figure=True,
+                    )
             else:
                 st.caption("Click **Plot distribution** to render the histogram.")
 
@@ -1920,6 +1938,7 @@ with tabs[5]:
                         "and rebuild."
                     )
                 else:
+                  with safe_block("the outlier plot"):
                     _outlier_fig = iviz.outlier_scatter(
                         df,
                         column=_o_col,
